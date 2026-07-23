@@ -67,12 +67,23 @@ type workspaceActionResultMsg struct {
 type workspaceChange struct {
 	change worktree.Change
 	staged bool
+	path   string
+	name   string
+	depth  int
+	isDir  bool
 }
 
 type workspaceChangeRow struct {
 	title string
 	index int
 	item  workspaceChange
+}
+
+func (c workspaceChange) displayPath() string {
+	if c.path != "" {
+		return c.path
+	}
+	return c.change.Path
 }
 
 func (m Model) fetchWorkspaceCmd(request uint64) tea.Cmd {
@@ -260,7 +271,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		changes := m.filteredWorkspaceChanges()
 		if m.workspacePendingPath != "" {
 			for index, change := range changes {
-				if change.change.Path == m.workspacePendingPath {
+				if change.displayPath() == m.workspacePendingPath {
 					m.workspaceCursor = index
 					break
 				}
@@ -365,8 +376,12 @@ func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 		return m, nil
 	}
 	selected := changes[m.workspaceCursor]
+	if selected.isDir {
+		m.workspaceDiff = worktree.Diff{}
+		return m, nil
+	}
 	m.workspacePreviewLoading = true
-	return m, m.fetchWorkspaceDiffCmd(m.workspacePreviewRequest, selected.change.Path, selected.staged)
+	return m, m.fetchWorkspaceDiffCmd(m.workspacePreviewRequest, selected.displayPath(), selected.staged)
 }
 
 func (m Model) filteredWorkspaceEntries() []worktree.Entry {
@@ -512,13 +527,36 @@ func (m Model) filteredWorkspaceChanges() []workspaceChange {
 	query := strings.ToLower(strings.TrimSpace(m.fileFilter.Value()))
 	staged, changes := sortedChangeGroups(m.workspaceStatus, query)
 	result := make([]workspaceChange, 0, len(staged)+len(changes))
-	for _, change := range staged {
-		result = append(result, workspaceChange{change: change, staged: true})
+	result = append(result, workspaceChangeTree(staged, true)...)
+	result = append(result, workspaceChangeTree(changes, false)...)
+	return result
+}
+
+func workspaceChangeTree(changes []worktree.Change, staged bool) []workspaceChange {
+	directories := make(map[string]struct{})
+	for _, change := range changes {
+		parts := strings.Split(change.Path, "/")
+		for index := 1; index < len(parts); index++ {
+			directories[strings.Join(parts[:index], "/")] = struct{}{}
+		}
+	}
+	result := make([]workspaceChange, 0, len(changes)+len(directories))
+	for path := range directories {
+		result = append(result, newWorkspaceChange(path, staged, true, worktree.Change{}))
 	}
 	for _, change := range changes {
-		result = append(result, workspaceChange{change: change})
+		result = append(result, newWorkspaceChange(change.Path, staged, false, change))
 	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].path < result[j].path })
 	return result
+}
+
+func newWorkspaceChange(path string, staged, isDir bool, change worktree.Change) workspaceChange {
+	name := path
+	if slash := strings.LastIndex(path, "/"); slash >= 0 {
+		name = path[slash+1:]
+	}
+	return workspaceChange{change: change, staged: staged, path: path, name: name, depth: strings.Count(path, "/"), isDir: isDir}
 }
 
 func (m *Model) clampWorkspaceCursor(length int) {
@@ -566,7 +604,7 @@ func (m Model) workspaceChangeRows() []workspaceChangeRow {
 			}
 			count := 0
 			for _, candidate := range changes {
-				if candidate.staged == change.staged {
+				if candidate.staged == change.staged && !candidate.isDir {
 					count++
 				}
 			}
@@ -783,10 +821,10 @@ func (m Model) toggleWorkspaceStage(key string) (tea.Model, tea.Cmd) {
 		run = m.workspace.Unstage
 	}
 	m.actionBusy = true
-	m.workspacePendingPath = selected.change.Path
-	m.status = action + " " + sanitizeWorkspaceLabel(selected.change.Path) + "…"
+	m.workspacePendingPath = selected.displayPath()
+	m.status = action + " " + sanitizeWorkspaceLabel(selected.displayPath()) + "…"
 	request := m.workspaceRequest
-	path := selected.change.Path
+	path := selected.displayPath()
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

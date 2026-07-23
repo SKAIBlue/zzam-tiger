@@ -389,6 +389,38 @@ func TestWorkspaceCommitOrderMatchesRenderedGroups(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitChangesFormDirectoryTree(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceCommitTab
+	m.workspaceStatus = worktree.Status{Unstaged: []worktree.Change{
+		{Path: "cmd/app/main.go", Code: 'M'},
+		{Path: "cmd/app/run.go", Code: 'M'},
+		{Path: "README.md", Code: 'M'},
+	}}
+
+	changes := m.filteredWorkspaceChanges()
+	want := []struct {
+		path  string
+		dir   bool
+		depth int
+	}{
+		{path: "README.md"},
+		{path: "cmd", dir: true},
+		{path: "cmd/app", dir: true, depth: 1},
+		{path: "cmd/app/main.go", depth: 2},
+		{path: "cmd/app/run.go", depth: 2},
+	}
+	if len(changes) != len(want) {
+		t.Fatalf("tree length = %d, want %d: %#v", len(changes), len(want), changes)
+	}
+	for index, expected := range want {
+		got := changes[index]
+		if got.displayPath() != expected.path || got.isDir != expected.dir || got.depth != expected.depth {
+			t.Fatalf("tree item %d = path %q dir=%t depth=%d, want %#v", index, got.displayPath(), got.isDir, got.depth, expected)
+		}
+	}
+}
+
 func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 	workspace := &fakeWorkspace{diffs: map[string]worktree.Diff{
 		"a.go": {Path: "a.go"}, "b.go": {Path: "b.go"},
@@ -781,6 +813,51 @@ func TestWorkspaceStageAndUnstageShortcuts(t *testing.T) {
 			}
 			if result.(workspaceActionResultMsg).err != nil {
 				t.Fatalf("action result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestWorkspaceStageAndUnstageDirectoryShortcuts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  rune
+		path string
+	}{
+		{name: "stage directory", key: 's', path: "internal/tui"},
+		{name: "unstage directory", key: 'u', path: "internal/tui"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace := &fakeWorkspace{}
+			m := newWithWorkspace(fakeProvider{}, 0, workspace)
+			m.active = workspaceCommitTab
+			if test.key == 's' {
+				m.workspaceStatus.Unstaged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}}
+			} else {
+				m.workspaceStatus.Staged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}}
+			}
+			changes := m.filteredWorkspaceChanges()
+			for index, change := range changes {
+				if change.displayPath() == test.path {
+					m.workspaceCursor = index
+					break
+				}
+			}
+
+			updated, cmd := m.Update(key(test.key))
+			m = updated.(Model)
+			if cmd == nil || !m.actionBusy {
+				t.Fatal("directory shortcut did not start an action")
+			}
+			result := cmd().(workspaceActionResultMsg)
+			if result.err != nil {
+				t.Fatalf("directory action failed: %v", result.err)
+			}
+			if test.key == 's' && (len(workspace.staged) != 1 || workspace.staged[0] != test.path) {
+				t.Fatalf("stage calls = %#v", workspace.staged)
+			}
+			if test.key == 'u' && (len(workspace.unstaged) != 1 || workspace.unstaged[0] != test.path) {
+				t.Fatalf("unstage calls = %#v", workspace.unstaged)
 			}
 		})
 	}

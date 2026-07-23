@@ -180,7 +180,7 @@ func (m Model) workspaceView() string {
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ select · Enter/→ expand · ← collapse · click toggle · PgUp/PgDn preview · / filter"
 	if m.active == workspaceCommitTab {
-		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle · s/u selected · S/U all · / filter"
+		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle · s/u file or folder · S/U all · / filter"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
@@ -251,12 +251,21 @@ func (m Model) workspaceList(width, height int) string {
 			rows = append(rows, sectionTitleStyle.Render(truncate(" "+display.title, width)))
 			continue
 		}
-		change := display.item.change
+		item := display.item
+		change := item.change
 		badge := string(change.Code)
-		if badge == "?" {
+		icon := "·"
+		if item.isDir {
+			badge = " "
+			icon = "▾"
+		} else if badge == "?" {
 			badge = "U"
 		}
-		row := fmt.Sprintf("  %s %s", badge, sanitizeWorkspaceLabel(change.Path))
+		name := item.name
+		if name == "" {
+			name = item.displayPath()
+		}
+		row := fmt.Sprintf("  %s %s%s %s", badge, strings.Repeat("  ", item.depth), icon, sanitizeWorkspaceLabel(name))
 		row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 		if display.index == m.workspaceCursor {
 			row = selectedRow.Render(row)
