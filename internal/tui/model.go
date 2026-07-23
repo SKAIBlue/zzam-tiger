@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -81,6 +82,15 @@ type actionResultMsg struct {
 
 type tickMsg time.Time
 
+type updateResultMsg struct {
+	available bool
+}
+
+type installFinishedMsg struct{}
+
+type updateChecker func(context.Context, string) (string, bool, error)
+type installCommand func() *exec.Cmd
+
 type Model struct {
 	backend   provider.Provider
 	workspace workspaceClient
@@ -148,6 +158,11 @@ type Model struct {
 	lastUpdated   time.Time
 	status        string
 	err           error
+
+	currentVersion  string
+	updateAvailable bool
+	checkUpdate     updateChecker
+	installUpdate   installCommand
 }
 
 func New(backend provider.Provider, refresh time.Duration) Model {
@@ -196,6 +211,14 @@ func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace
 	return newWithWorkspace(backend, refresh, workspace)
 }
 
+// WithUpdates enables the non-blocking release check and installer action.
+func (m Model) WithUpdates(current string, checker func(context.Context, string) (string, bool, error), installer func() *exec.Cmd) Model {
+	m.currentVersion = current
+	m.checkUpdate = checker
+	m.installUpdate = installer
+	return m
+}
+
 func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspace workspaceClient) Model {
 	model := New(backend, refresh)
 	model.workspace = workspace
@@ -223,10 +246,25 @@ func (m Model) Init() tea.Cmd {
 		initial = m.fetchListCmd(m.listRequest, m.kind(), m.filter())
 	}
 	commands := []tea.Cmd{initial}
+	if m.checkUpdate != nil {
+		commands = append(commands, m.checkUpdateCmd())
+	}
 	if m.refresh > 0 {
 		commands = append(commands, tickCmd(m.refresh))
 	}
 	return tea.Batch(commands...)
+}
+
+func (m Model) checkUpdateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, available, err := m.checkUpdate(ctx, m.currentVersion)
+		if err != nil {
+			return updateResultMsg{}
+		}
+		return updateResultMsg{available: available}
+	}
 }
 
 func (m Model) kind() provider.Kind {
@@ -366,6 +404,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case workspaceActionResultMsg:
 		return m.handleWorkspaceActionResult(msg)
+
+	case updateResultMsg:
+		m.updateAvailable = msg.available
+		return m, nil
+
+	case installFinishedMsg:
+		return m, tea.Quit
 
 	case listResultMsg:
 		if m.localTab() || msg.request != m.listRequest || msg.kind != m.kind() || msg.filter != m.filter().Value {
@@ -1439,6 +1484,10 @@ func reviewActionBounds(meta, action string, baseX int) (int, int) {
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.updateAvailable && m.installUpdate != nil && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 0 && msg.X >= m.updateButtonStart() {
+		m.updateAvailable = false
+		return m, tea.ExecProcess(m.installUpdate(), func(error) tea.Msg { return installFinishedMsg{} })
+	}
 	if m.actionBusy {
 		return m, nil
 	}

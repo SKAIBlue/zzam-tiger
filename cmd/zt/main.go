@@ -10,6 +10,7 @@ import (
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 	"github.com/SKAIBlue/zzam-tiger/internal/tui"
+	"github.com/SKAIBlue/zzam-tiger/internal/updater"
 	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
@@ -38,7 +39,7 @@ func main() {
 	}
 
 	workspace := worktree.New(".", provider.ExecRunner{})
-	model := tui.NewWithWorktree(backend, *refresh, workspace)
+	model := tui.NewWithWorktree(backend, *refresh, workspace).WithUpdates(version, updater.CheckLatest, updater.InstallCommand)
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "zt: %v\n", err)

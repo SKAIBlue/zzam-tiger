@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/zt-logo.png" alt="zzam-tiger logo" width="360">
+</p>
+
 # zzam-tiger
 
 `zzam-tiger` is a mouse-friendly terminal UI for local Git worktrees plus GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
@@ -31,25 +35,25 @@ The provider is selected from the current repository's `origin` URL. `github.com
 
 ## Prerequisites
 
-- Go 1.24+ when installing from source
 - GitHub: [`gh`](https://cli.github.com/) and `gh auth login`
 - GitLab: [`glab`](https://gitlab.com/gitlab-org/cli) and `glab auth login`
+- Go 1.24+ only when building from source
 
 ## Install
 
-From a checkout:
+Install the latest release for your OS and CPU architecture:
 
 ```sh
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/SKAIBlue/zzam-tiger/main/install.sh | sh
 ```
 
-The default destination is `~/.local/bin`. Override it when needed:
+The installer verifies the release archive against its published SHA-256 checksum. The default destination is `~/.local/bin`; override it when needed:
 
 ```sh
-INSTALL_DIR=/usr/local/bin ./install.sh
+curl -fsSL https://raw.githubusercontent.com/SKAIBlue/zzam-tiger/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 ```
 
-The same script can be piped from a published repository. Set `ZZAM_TIGER_REPO=owner/repo` when using a fork.
+Set `ZZAM_TIGER_REPO=owner/repo` when installing from a fork whose releases use the same asset names.
 
 ## Run
 

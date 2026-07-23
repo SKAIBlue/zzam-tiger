@@ -39,6 +39,7 @@ var (
 	reviewBodyStyle     = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
 	selectedReviewStyle = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
 	commitButtonStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent).Padding(0, 1)
+	updateButtonStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(green).Padding(0, 1)
 )
 
 func (m Model) View() string {
@@ -67,7 +68,7 @@ func (m Model) listView() string {
 	}
 	lines := make([]string, 0, m.height)
 	title := fmt.Sprintf(" zzam-tiger  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
-	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
+	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
 	lines = append(lines, m.filtersView())
@@ -136,7 +137,7 @@ func (m Model) tabsView() string {
 func (m Model) workspaceView() string {
 	lines := make([]string, 0, m.height)
 	title := fmt.Sprintf(" zzam-tiger  local %s · remote %s/%s", sanitizeWorkspaceLabel(m.workspace.Root()), sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
-	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
+	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
 	filter := m.fileFilter.View()
@@ -193,6 +194,20 @@ func (m Model) workspaceCommitComposer() string {
 	input.Width = inputWidth
 	field := lipgloss.NewStyle().Width(inputWidth).Render(input.View())
 	return truncate(label+field+" "+button, m.width)
+}
+
+func (m Model) headerView(title string) string {
+	if !m.updateAvailable {
+		return headerStyle.Render(truncate(title, m.width))
+	}
+	button := updateButtonStyle.Render("Update")
+	titleWidth := max(0, m.width-lipgloss.Width(button)-1)
+	left := lipgloss.NewStyle().Width(titleWidth).Render(headerStyle.Render(truncate(title, titleWidth)))
+	return truncate(left+" "+button, m.width)
+}
+
+func (m Model) updateButtonStart() int {
+	return max(0, m.width-lipgloss.Width(updateButtonStyle.Render("Update")))
 }
 
 func (m Model) workspaceList(width, height int) string {
@@ -449,7 +464,7 @@ func (m Model) detailView() string {
 		item = m.detail.Item
 	}
 	title := fmt.Sprintf(" ← Esc  %s  %s", stateBadge(item.State), item.Title)
-	lines := []string{headerStyle.Render(truncate(title, m.width))}
+	lines := []string{m.headerView(title)}
 	metaParts := []string{item.Meta}
 	if assignableKind(m.kind()) {
 		metaParts = append(metaParts, assigneeLabel(item.Assignees))
@@ -505,7 +520,7 @@ func (m Model) diffView() string {
 		item = m.detail.Item
 	}
 	title := fmt.Sprintf(" ← Esc  %s  Diff · %s", stateBadge(item.State), item.Title)
-	lines := []string{headerStyle.Render(truncate(title, m.width))}
+	lines := []string{m.headerView(title)}
 	fileLabel := " No changed files"
 	if m.diffFile >= 0 && m.diffFile < len(m.detail.Diffs) {
 		file := m.detail.Diffs[m.diffFile]

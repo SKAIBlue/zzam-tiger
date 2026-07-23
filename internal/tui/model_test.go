@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,38 @@ func (p *actionProvider) Rerun(_ context.Context, item provider.Item) error {
 
 func key(value rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{value}}
+}
+
+func TestUpdateButtonAppearsAndStartsInstaller(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height = 80, 20
+	m.installUpdate = func() *exec.Cmd { return exec.Command("sh", "-c", "true") }
+
+	updated, _ := m.Update(updateResultMsg{available: true})
+	m = updated.(Model)
+	if view := ansi.Strip(m.View()); !strings.Contains(strings.Split(view, "\n")[0], "Update") {
+		t.Fatalf("update button missing from header: %q", view)
+	}
+
+	updated, cmd := m.Update(tea.MouseMsg{
+		X: m.updateButtonStart(), Y: 0,
+		Button: tea.MouseButtonLeft, Action: tea.MouseActionPress,
+	})
+	m = updated.(Model)
+	if cmd == nil || m.updateAvailable {
+		t.Fatalf("update click did not start installer: command=%v available=%t", cmd != nil, m.updateAvailable)
+	}
+}
+
+func TestInstallerCompletionQuits(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	_, cmd := m.Update(installFinishedMsg{})
+	if cmd == nil {
+		t.Fatal("installer completion did not return a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("installer completion command returned %T, want tea.QuitMsg", cmd())
+	}
 }
 
 func TestShiftNumberKeysSwitchTabs(t *testing.T) {

@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  VERSION: ${{ github.ref_name }}
+
 jobs:
   test:
     name: Test
@@ -54,8 +57,6 @@ jobs:
       - name: Prepare release metadata
         id: metadata
         shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           safe_version="${VERSION//\//-}"
           echo "archive=zt_${safe_version}_linux_${{ matrix.name }}.tar.gz" >> "$GITHUB_OUTPUT"
@@ -64,7 +65,6 @@ jobs:
         shell: bash
         env:
           GOARCH: ${{ matrix.goarch }}
-          VERSION: ${{ github.ref_name }}
           ARCHIVE: ${{ steps.metadata.outputs.archive }}
         run: |
           mkdir -p package
@@ -97,8 +97,6 @@ jobs:
 
       - name: Build and package
         shell: bash
-        env:
-          VERSION: ${{ github.ref_name }}
         run: |
           safe_version="${VERSION//\//-}"
           mkdir -p build universal apple-silicon
@@ -144,10 +142,9 @@ jobs:
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$TAG" dist/* \
+          gh release create "$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
+            --title "$VERSION" \
             --generate-notes \
             --verify-tag
