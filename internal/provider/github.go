@@ -300,6 +300,7 @@ func (g *GitHub) listAssigned(ctx context.Context, kind Kind, current Assignee) 
 		item.AssignedToMe = true
 		items = append(items, item)
 	}
+	openItemsFirst(items)
 	return items, nil
 }
 

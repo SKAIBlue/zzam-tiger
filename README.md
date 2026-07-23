@@ -7,7 +7,7 @@ The provider is selected from the current repository's `origin` URL. `github.com
 ## Features
 
 - Tabs for pull/merge requests, issues, milestones, branches, and commit history
-- Status filters with `←`/`→`: Open, Assigned to me, Closed, Merged, and All where applicable
+- Status filters with `←`/`→`: Open, Assigned to me, Closed, Merged, and All where applicable; assigned items keep open entries ahead of closed or merged entries
 - Keyboard and mouse navigation, clickable tabs/filters/rows, and wheel scrolling
 - Issue and PR/MR rows show state and assignees; items assigned to you have highlighted titles
 - Full detail views with separately boxed Markdown descriptions, updates, reviews, and comments

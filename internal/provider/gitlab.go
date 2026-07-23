@@ -184,6 +184,9 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 			}
 			items = append(items, current)
 		}
+		if filter.Value == "assigned" {
+			openItemsFirst(items)
+		}
 		return items, nil
 
 	case Branches:

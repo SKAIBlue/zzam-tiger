@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -155,4 +156,19 @@ func sameAssignee(left, right Assignee) bool {
 		return left.ID == right.ID
 	}
 	return strings.EqualFold(left.Login, right.Login)
+}
+
+func openItemsFirst(items []Item) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return isOpenState(items[i].State) && !isOpenState(items[j].State)
+	})
+}
+
+func isOpenState(state string) bool {
+	switch strings.ToLower(state) {
+	case "open", "opened":
+		return true
+	default:
+		return false
+	}
 }
