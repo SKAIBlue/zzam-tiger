@@ -70,6 +70,10 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 		default:
 			return nil, fmt.Errorf("could not detect provider from origin; pass --provider github or --provider gitlab")
 		}
+	} else if requested == "github" && !strings.EqualFold(host, "github.com") {
+		host = "github.com"
+	} else if requested == "gitlab" && (host == "" || strings.EqualFold(host, "github.com")) {
+		host = "gitlab.com"
 	}
 
 	command := map[string]string{"github": "gh", "gitlab": "glab"}[requested]

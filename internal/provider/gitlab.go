@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -54,6 +55,9 @@ func (g *GitLab) TabName(kind Kind) string {
 	if kind == PullRequests {
 		return "Merge Requests"
 	}
+	if kind == CIRuns {
+		return "Pipelines"
+	}
 	return kind.String()
 }
 
@@ -65,6 +69,8 @@ func (g *GitLab) Filters(kind Kind) []Filter {
 		return []Filter{{"Open", "opened"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"All", "all"}}
 	case Milestones:
 		return []Filter{{"Open", "active"}, {"Closed", "closed"}, {"All", "all"}}
+	case CIRuns:
+		return []Filter{{"All", "all"}, {"Running", "running"}, {"Pending", "pending"}, {"Success", "success"}, {"Failure", "failed"}}
 	default:
 		return []Filter{{"All", "all"}}
 	}
@@ -112,6 +118,48 @@ type gitlabItem struct {
 		Total  int `json:"total"`
 		Closed int `json:"closed"`
 	} `json:"stats"`
+}
+
+type gitlabPipeline struct {
+	ID        int64      `json:"id"`
+	IID       int64      `json:"iid"`
+	Name      string     `json:"name"`
+	Status    string     `json:"status"`
+	Source    string     `json:"source"`
+	Ref       string     `json:"ref"`
+	SHA       string     `json:"sha"`
+	WebURL    string     `json:"web_url"`
+	CreatedAt string     `json:"created_at"`
+	UpdatedAt string     `json:"updated_at"`
+	User      gitlabUser `json:"user"`
+}
+
+type gitlabJob struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Stage     string `json:"stage"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at"`
+}
+
+func (p gitlabPipeline) item() Item {
+	title := p.Name
+	if title == "" {
+		title = p.Ref
+	}
+	author := p.User.Username
+	if author == "" {
+		author = p.User.Name
+	}
+	meta := p.Ref
+	if p.Source != "" {
+		meta += " · " + p.Source
+	}
+	updated := p.UpdatedAt
+	if updated == "" {
+		updated = p.CreatedAt
+	}
+	return Item{ID: strconv.FormatInt(p.ID, 10), Title: title, State: p.Status, Author: author, HeadSHA: p.SHA, UpdatedAt: parseTime(updated), Meta: meta, URL: p.WebURL}
 }
 
 func gitlabListItem(raw gitlabItem) Item {
@@ -234,6 +282,24 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 			items = append(items, entry.item())
 		}
 		return items, nil
+	case CIRuns:
+		endpoint := base + "/pipelines?per_page=100&order_by=updated_at&sort=desc"
+		if filter.Value != "" && filter.Value != "all" {
+			endpoint += "&status=" + url.QueryEscape(filter.Value)
+		}
+		data, err := g.api(ctx, "GET", endpoint)
+		if err != nil {
+			return nil, err
+		}
+		var raw []gitlabPipeline
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("decode GitLab pipelines: %w", err)
+		}
+		items := make([]Item, 0, len(raw))
+		for _, pipeline := range raw {
+			items = append(items, pipeline.item())
+		}
+		return items, nil
 	default:
 		return nil, fmt.Errorf("unsupported GitLab list kind: %s", kind)
 	}
@@ -263,8 +329,51 @@ func (c gitlabCommit) item() Item {
 }
 
 type gitlabNote struct {
-	Body      string     `json:"body"`
-	System    bool       `json:"system"`
+	ID               int64                 `json:"id"`
+	Body             string                `json:"body"`
+	System           bool                  `json:"system"`
+	Resolvable       bool                  `json:"resolvable"`
+	Resolved         bool                  `json:"resolved"`
+	CreatedAt        string                `json:"created_at"`
+	Author           gitlabUser            `json:"author"`
+	Position         *gitlabReviewPosition `json:"position"`
+	OriginalPosition *gitlabReviewPosition `json:"original_position"`
+}
+
+type gitlabDiscussion struct {
+	ID    string       `json:"id"`
+	Notes []gitlabNote `json:"notes"`
+}
+
+type gitlabReviewLine struct {
+	LineCode string `json:"line_code"`
+	Type     string `json:"type"`
+	OldLine  int    `json:"old_line,omitempty"`
+	NewLine  int    `json:"new_line,omitempty"`
+}
+
+type gitlabReviewLineRange struct {
+	Start gitlabReviewLine `json:"start"`
+	End   gitlabReviewLine `json:"end"`
+}
+
+type gitlabReviewPosition struct {
+	PositionType string                 `json:"position_type"`
+	OldPath      string                 `json:"old_path"`
+	NewPath      string                 `json:"new_path"`
+	OldLine      int                    `json:"old_line,omitempty"`
+	NewLine      int                    `json:"new_line,omitempty"`
+	BaseSHA      string                 `json:"base_sha"`
+	StartSHA     string                 `json:"start_sha"`
+	HeadSHA      string                 `json:"head_sha"`
+	LineRange    *gitlabReviewLineRange `json:"line_range,omitempty"`
+}
+
+type gitlabCommitComment struct {
+	Note      string     `json:"note"`
+	Path      string     `json:"path"`
+	Line      *int       `json:"line"`
+	LineType  string     `json:"line_type"`
 	CreatedAt string     `json:"created_at"`
 	Author    gitlabUser `json:"author"`
 }
@@ -298,12 +407,20 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			detail.Item.Meta = fmt.Sprintf("#%d · %s", raw.IID, detail.Item.Author)
 		} else {
 			detail.Sections = append(detail.Sections, Section{Title: "Changes", Markdown: fmt.Sprintf("`%s` → `%s` · **%s** files changed · merge status: **%s**", raw.SourceBranch, raw.TargetBranch, raw.ChangesCount, raw.DetailedStatus)})
+			diffs, err := g.gitlabMergeRequestDiffs(ctx, item.ID)
+			if err != nil {
+				return Detail{}, err
+			}
+			detail.Diffs = diffs
 		}
-		notes, err := g.discussions(ctx, resource, item.ID)
+		notes, reviews, err := g.discussions(ctx, resource, item.ID)
 		if err != nil {
 			return Detail{}, err
 		}
 		detail.Sections = append(detail.Sections, notes...)
+		if kind == PullRequests {
+			detail.Sections = append(detail.Sections, attachDiffReviews(detail.Diffs, reviews)...)
+		}
 		return detail, nil
 
 	case Milestones:
@@ -352,7 +469,7 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return Detail{}, fmt.Errorf("decode GitLab commit: %w", err)
 		}
-		diffData, err := g.api(ctx, "GET", base+"/repository/commits/"+item.ID+"/diff?per_page=100")
+		diffData, err := g.api(ctx, "GET", base+"/repository/commits/"+item.ID+"/diff?per_page=100&unidiff=true")
 		if err != nil {
 			return Detail{}, err
 		}
@@ -362,11 +479,15 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			NewFile     bool   `json:"new_file"`
 			RenamedFile bool   `json:"renamed_file"`
 			DeletedFile bool   `json:"deleted_file"`
+			Diff        string `json:"diff"`
+			Collapsed   bool   `json:"collapsed"`
+			TooLarge    bool   `json:"too_large"`
 		}
 		if err := json.Unmarshal(diffData, &diffs); err != nil {
 			return Detail{}, fmt.Errorf("decode GitLab commit diff: %w", err)
 		}
 		files := make([]string, 0, len(diffs))
+		diffFiles := make([]DiffFile, 0, len(diffs))
 		for _, diff := range diffs {
 			status := "modified"
 			switch {
@@ -378,27 +499,198 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 				status = "renamed from `" + diff.OldPath + "`"
 			}
 			files = append(files, fmt.Sprintf("- `%s` · %s", diff.NewPath, status))
+			diffFiles = append(diffFiles, DiffFile{
+				OldPath:  diff.OldPath,
+				NewPath:  diff.NewPath,
+				Lines:    ParseUnifiedDiffLines(diff.Diff),
+				TooLarge: diff.TooLarge || diff.Collapsed || diff.Diff == "",
+				HeadSHA:  raw.ID,
+			})
 		}
-		return Detail{Item: raw.item(), Body: raw.Message, Sections: []Section{{Title: "Stats", Markdown: fmt.Sprintf("**%d** files changed · +%d / -%d", raw.Stats.Total, raw.Stats.Additions, raw.Stats.Deletions)}, {Title: "Files", Markdown: strings.Join(files, "\n")}}}, nil
+		detail := Detail{Item: raw.item(), Body: raw.Message, Sections: []Section{{Title: "Stats", Markdown: fmt.Sprintf("**%d** files changed · +%d / -%d", raw.Stats.Total, raw.Stats.Additions, raw.Stats.Deletions)}, {Title: "Files", Markdown: strings.Join(files, "\n")}}, Diffs: diffFiles}
+		comments, err := g.gitlabCommitComments(ctx, item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		detail.Sections = append(detail.Sections, attachDiffReviews(detail.Diffs, gitlabCommitPositionedComments(comments))...)
+		return detail, nil
+	case CIRuns:
+		data, err := g.api(ctx, "GET", base+"/pipelines/"+item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		var raw gitlabPipeline
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return Detail{}, fmt.Errorf("decode GitLab pipeline: %w", err)
+		}
+		detail := Detail{
+			Item: raw.item(),
+			Body: fmt.Sprintf("- Source: `%s`\n- Ref: `%s`\n- Commit: `%s`", raw.Source, raw.Ref, raw.SHA),
+		}
+		jobData, err := g.api(ctx, "GET", base+"/pipelines/"+item.ID+"/jobs?per_page=100")
+		if err != nil {
+			return Detail{}, err
+		}
+		var jobs []gitlabJob
+		if err := json.Unmarshal(jobData, &jobs); err != nil {
+			return Detail{}, fmt.Errorf("decode GitLab pipeline jobs: %w", err)
+		}
+		for _, job := range jobs {
+			log := "_No log output yet._"
+			if job.StartedAt != "" {
+				trace, err := g.api(ctx, "GET", base+"/jobs/"+strconv.FormatInt(job.ID, 10)+"/trace")
+				if err != nil {
+					log = "_Logs unavailable._"
+				} else if len(trace) > 0 {
+					log = ciLogMarkdown(trace)
+				}
+			}
+			title := "Logs · " + job.Name + " · " + job.Status
+			if job.Stage != "" {
+				title = "Logs · " + job.Stage + " / " + job.Name + " · " + job.Status
+			}
+			detail.Sections = append(detail.Sections, Section{Title: title, Markdown: log})
+		}
+		return detail, nil
 	default:
 		return Detail{}, fmt.Errorf("unsupported GitLab detail kind: %s", kind)
 	}
 }
 
-func (g *GitLab) discussions(ctx context.Context, resource, id string) ([]Section, error) {
-	data, err := g.api(ctx, "GET", "projects/"+g.project+"/"+resource+"/"+id+"/discussions?per_page=100")
+func (g *GitLab) gitlabCommitComments(ctx context.Context, sha string) ([]gitlabCommitComment, error) {
+	data, err := g.api(ctx, "GET", "projects/"+g.project+"/repository/commits/"+sha+"/comments?per_page=100")
 	if err != nil {
 		return nil, err
 	}
-	var discussions []struct {
-		ID    string       `json:"id"`
-		Notes []gitlabNote `json:"notes"`
+	var comments []gitlabCommitComment
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return nil, fmt.Errorf("decode GitLab commit comments: %w", err)
 	}
-	if err := json.Unmarshal(data, &discussions); err != nil {
-		return nil, fmt.Errorf("decode GitLab discussions: %w", err)
+	return comments, nil
+}
+
+func gitlabCommitPositionedComments(comments []gitlabCommitComment) []positionedDiffReview {
+	positioned := make([]positionedDiffReview, 0, len(comments))
+	for _, comment := range comments {
+		review := DiffReview{Author: comment.Author.Username, Body: comment.Note, CreatedAt: parseTime(comment.CreatedAt)}
+		if comment.Line != nil {
+			if comment.LineType == "old" {
+				review.OldLine = *comment.Line
+				review.Side = ReviewSideOld
+			} else {
+				review.NewLine = *comment.Line
+				review.Side = ReviewSideNew
+			}
+		}
+		location := "commit"
+		if comment.Path != "" {
+			location = "`" + comment.Path + "`"
+			if comment.Line != nil {
+				location += fmt.Sprintf(":%d", *comment.Line)
+			}
+		}
+		positioned = append(positioned, positionedDiffReview{
+			OldPath: comment.Path,
+			NewPath: comment.Path,
+			Review:  review,
+			Fallback: Section{
+				Title:    "Commit comment · @" + comment.Author.Username + " · " + location + " · " + displayTime(parseTime(comment.CreatedAt)),
+				Markdown: comment.Note,
+			},
+		})
+	}
+	return positioned
+}
+
+func (g *GitLab) gitlabMergeRequestDiffs(ctx context.Context, id string) ([]DiffFile, error) {
+	base := "projects/" + g.project + "/merge_requests/" + id
+	host := g.host
+	if host == "" {
+		host = "gitlab.com"
+	}
+	data, err := g.runner.Run(ctx, "glab", "api", base+"/diffs?per_page=100&unidiff=true", "--hostname", host, "--method", "GET", "--paginate", "--output", "json")
+	if err != nil {
+		return nil, err
+	}
+	var rawDiffs []struct {
+		OldPath   string `json:"old_path"`
+		NewPath   string `json:"new_path"`
+		Diff      string `json:"diff"`
+		TooLarge  bool   `json:"too_large"`
+		Collapsed bool   `json:"collapsed"`
+	}
+	if err := json.Unmarshal(data, &rawDiffs); err != nil {
+		return nil, fmt.Errorf("decode GitLab merge request diffs: %w", err)
+	}
+	versionData, err := g.api(ctx, "GET", base+"/versions?per_page=1")
+	if err != nil {
+		return nil, err
+	}
+	var versions []struct {
+		BaseSHA  string `json:"base_commit_sha"`
+		StartSHA string `json:"start_commit_sha"`
+		HeadSHA  string `json:"head_commit_sha"`
+	}
+	if err := json.Unmarshal(versionData, &versions); err != nil {
+		return nil, fmt.Errorf("decode GitLab merge request versions: %w", err)
+	}
+	if len(versions) == 0 {
+		return nil, fmt.Errorf("GitLab merge request %s has no diff version", id)
+	}
+	version := versions[0]
+	diffs := make([]DiffFile, 0, len(rawDiffs))
+	for _, diff := range rawDiffs {
+		diffs = append(diffs, DiffFile{
+			OldPath:  diff.OldPath,
+			NewPath:  diff.NewPath,
+			Lines:    ParseUnifiedDiffLines(diff.Diff),
+			TooLarge: diff.TooLarge || diff.Collapsed,
+			BaseSHA:  version.BaseSHA,
+			StartSHA: version.StartSHA,
+			HeadSHA:  version.HeadSHA,
+		})
+	}
+	return diffs, nil
+}
+
+func (g *GitLab) discussions(ctx context.Context, resource, id string) ([]Section, []positionedDiffReview, error) {
+	var discussions []gitlabDiscussion
+	for page := 1; ; page++ {
+		endpoint := fmt.Sprintf("projects/%s/%s/%s/discussions?per_page=100&page=%d", g.project, resource, id, page)
+		data, err := g.api(ctx, "GET", endpoint)
+		if err != nil {
+			return nil, nil, err
+		}
+		var current []gitlabDiscussion
+		if err := json.Unmarshal(data, &current); err != nil {
+			return nil, nil, fmt.Errorf("decode GitLab discussions page %d: %w", page, err)
+		}
+		discussions = append(discussions, current...)
+		if len(current) < 100 {
+			break
+		}
 	}
 	sections := make([]Section, 0, len(discussions))
+	var reviews []positionedDiffReview
 	for _, discussion := range discussions {
+		var threadPosition *gitlabReviewPosition
+		threadOutdated := false
+		threadResolvable := false
+		threadResolved := false
+		for _, note := range discussion.Notes {
+			if note.Resolvable {
+				threadResolvable = true
+				threadResolved = note.Resolved
+			}
+			if note.Position != nil {
+				threadPosition = note.Position
+				break
+			}
+			if note.OriginalPosition != nil && threadPosition == nil {
+				threadPosition = note.OriginalPosition
+				threadOutdated = true
+			}
+		}
 		for noteIndex, note := range discussion.Notes {
 			kind := "Comment"
 			if len(discussion.Notes) > 1 {
@@ -414,10 +706,51 @@ func (g *GitLab) discussions(ctx context.Context, resource, id string) ([]Sectio
 			if author == "" {
 				author = note.Author.Name
 			}
-			sections = append(sections, Section{Title: kind + " · @" + author + " · " + displayTime(parseTime(note.CreatedAt)), Markdown: note.Body})
+			fallback := Section{Title: kind + " · @" + author + " · " + displayTime(parseTime(note.CreatedAt)), Markdown: note.Body}
+			if note.System || threadPosition == nil {
+				sections = append(sections, fallback)
+				continue
+			}
+			position := threadPosition
+			outdated := threadOutdated
+			if note.Position != nil {
+				position = note.Position
+				outdated = false
+			} else if note.OriginalPosition != nil {
+				position = note.OriginalPosition
+				outdated = true
+			}
+			noteID := ""
+			if note.ID > 0 {
+				noteID = strconv.FormatInt(note.ID, 10)
+			}
+			review := DiffReview{
+				ID:         noteID,
+				ThreadID:   discussion.ID,
+				Author:     author,
+				Body:       note.Body,
+				CreatedAt:  parseTime(note.CreatedAt),
+				OldLine:    position.OldLine,
+				NewLine:    position.NewLine,
+				Outdated:   outdated,
+				Resolved:   threadResolved,
+				Resolvable: threadResolvable,
+				Replyable:  true,
+				Side:       ReviewSideOld,
+			}
+			if position.NewLine > 0 {
+				review.Side = ReviewSideNew
+			}
+			if position.LineRange != nil {
+				review.StartOldLine = position.LineRange.Start.OldLine
+				review.StartNewLine = position.LineRange.Start.NewLine
+				review.OldLine = position.LineRange.End.OldLine
+				review.NewLine = position.LineRange.End.NewLine
+			}
+			reviews = append(reviews, positionedDiffReview{OldPath: position.OldPath, NewPath: position.NewPath, Review: review, Fallback: fallback})
 		}
 	}
-	return sections, nil
+	return sections, reviews, nil
 }
 
 func (g *GitLab) Merge(ctx context.Context, item Item) error {
@@ -427,6 +760,164 @@ func (g *GitLab) Merge(ctx context.Context, item Item) error {
 	fields := []string{"sha=" + item.HeadSHA}
 	_, err := g.api(ctx, "PUT", "projects/"+g.project+"/merge_requests/"+item.ID+"/merge", fields...)
 	return err
+}
+
+func (g *GitLab) CancelRun(ctx context.Context, item Item) error {
+	if err := requireItem(CIRuns, item); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "projects/"+g.project+"/pipelines/"+item.ID+"/cancel")
+	return err
+}
+
+func (g *GitLab) Rerun(ctx context.Context, item Item) error {
+	if err := requireItem(CIRuns, item); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "projects/"+g.project+"/pipelines/"+item.ID+"/retry")
+	return err
+}
+
+func (g *GitLab) AddComment(ctx context.Context, kind Kind, item Item, body string) error {
+	if err := requireCommentable(kind, item, body); err != nil {
+		return err
+	}
+	if kind == Commits {
+		_, err := g.api(ctx, "POST", "projects/"+g.project+"/repository/commits/"+item.ID+"/comments", "note="+body)
+		return err
+	}
+	resource := "issues"
+	if kind == PullRequests {
+		resource = "merge_requests"
+	}
+	_, err := g.api(ctx, "POST", "projects/"+g.project+"/"+resource+"/"+item.ID+"/notes", "body="+body)
+	return err
+}
+
+func (g *GitLab) AddReview(ctx context.Context, item Item, body string) error {
+	if err := requireReview(item, body); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "projects/"+g.project+"/merge_requests/"+item.ID+"/notes", "body="+body)
+	return err
+}
+
+func (g *GitLab) AddReviewComment(ctx context.Context, item Item, target ReviewTarget, body string) error {
+	if err := requireReviewComment(item, target, body); err != nil {
+		return err
+	}
+	if target.OldPath == "" || target.NewPath == "" {
+		return fmt.Errorf("review target requires old and new paths")
+	}
+	if target.BaseSHA == "" || target.StartSHA == "" {
+		return fmt.Errorf("review target has incomplete diff version")
+	}
+	payload := struct {
+		Body     string               `json:"body"`
+		Position gitlabReviewPosition `json:"position"`
+	}{
+		Body: body,
+		Position: gitlabReviewPosition{
+			PositionType: "text",
+			OldPath:      target.OldPath,
+			NewPath:      target.NewPath,
+			OldLine:      target.OldLine,
+			NewLine:      target.NewLine,
+			BaseSHA:      target.BaseSHA,
+			StartSHA:     target.StartSHA,
+			HeadSHA:      target.HeadSHA,
+		},
+	}
+	if target.IsRange() {
+		path := target.NewPath
+		if path == "" {
+			path = target.OldPath
+		}
+		payload.Position.LineRange = &gitlabReviewLineRange{
+			Start: gitlabRangeLine(path, target.StartOldLine, target.StartNewLine, target.StartOldPosition, target.StartNewPosition),
+			End:   gitlabRangeLine(path, target.OldLine, target.NewLine, target.OldPosition, target.NewPosition),
+		}
+	}
+	input, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode GitLab review comment: %w", err)
+	}
+	host := g.host
+	if host == "" {
+		host = "gitlab.com"
+	}
+	runner, ok := g.runner.(InputRunner)
+	if !ok {
+		return fmt.Errorf("GitLab review comments require a runner that supports standard input")
+	}
+	args := []string{"api", "projects/" + g.project + "/merge_requests/" + item.ID + "/discussions", "--hostname", host, "--method", "POST", "--input", "-", "--header", "Content-Type: application/json"}
+	_, err = runner.RunInput(ctx, input, "glab", args...)
+	return err
+}
+
+func (g *GitLab) AddCommitComment(ctx context.Context, item Item, target ReviewTarget, body string) error {
+	if err := requireCommitComment(item, target, body); err != nil {
+		return err
+	}
+	path := target.NewPath
+	line := target.NewLine
+	lineType := "new"
+	if target.reviewSide() == ReviewSideOld {
+		path = target.OldPath
+		line = target.OldLine
+		lineType = "old"
+	}
+	data, err := g.api(ctx, "POST", "projects/"+g.project+"/repository/commits/"+item.ID+"/comments",
+		"note="+body,
+		"path="+path,
+		"line="+strconv.Itoa(line),
+		"line_type="+lineType,
+	)
+	if err != nil {
+		return err
+	}
+	var created gitlabCommitComment
+	if err := json.Unmarshal(data, &created); err != nil {
+		return fmt.Errorf("decode GitLab commit comment response: %w", err)
+	}
+	if created.Path != path || created.Line == nil || *created.Line != line || created.LineType != lineType {
+		return fmt.Errorf("GitLab created the comment without the requested %s:%d anchor", path, line)
+	}
+	return nil
+}
+
+func (g *GitLab) AddReviewReply(ctx context.Context, item Item, target ReviewThreadTarget, body string) error {
+	if err := requireReviewReply(item, target, body); err != nil {
+		return err
+	}
+	if target.ThreadID == "" {
+		return fmt.Errorf("GitLab review reply has no discussion ID")
+	}
+	endpoint := "projects/" + g.project + "/merge_requests/" + item.ID + "/discussions/" + url.PathEscape(target.ThreadID) + "/notes"
+	_, err := g.api(ctx, "POST", endpoint, "body="+body)
+	return err
+}
+
+func (g *GitLab) ResolveReview(ctx context.Context, item Item, target ReviewThreadTarget) error {
+	if err := requireResolvableReview(item, target); err != nil {
+		return err
+	}
+	endpoint := "projects/" + g.project + "/merge_requests/" + item.ID + "/discussions/" + url.PathEscape(target.ThreadID)
+	_, err := g.api(ctx, "PUT", endpoint, "resolved=true")
+	return err
+}
+
+func gitlabRangeLine(path string, oldLine, newLine, oldPosition, newPosition int) gitlabReviewLine {
+	lineType := "old"
+	if oldLine == 0 {
+		lineType = "new"
+	}
+	return gitlabReviewLine{
+		LineCode: fmt.Sprintf("%x_%d_%d", sha1.Sum([]byte(path)), oldPosition, newPosition),
+		Type:     lineType,
+		OldLine:  oldLine,
+		NewLine:  newLine,
+	}
 }
 
 func (g *GitLab) SetIssueState(ctx context.Context, item Item, open bool) error {

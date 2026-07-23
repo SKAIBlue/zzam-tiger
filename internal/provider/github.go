@@ -1,9 +1,12 @@
 package provider
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"strconv"
 	"strings"
@@ -49,7 +52,12 @@ func NewGitHub(runner Runner, repo, host string) (*GitHub, error) {
 func (g *GitHub) Name() string       { return "GitHub" }
 func (g *GitHub) Repository() string { return g.repo }
 
-func (g *GitHub) TabName(kind Kind) string { return kind.String() }
+func (g *GitHub) TabName(kind Kind) string {
+	if kind == CIRuns {
+		return "Actions"
+	}
+	return kind.String()
+}
 
 func (g *GitHub) Filters(kind Kind) []Filter {
 	switch kind {
@@ -59,6 +67,8 @@ func (g *GitHub) Filters(kind Kind) []Filter {
 		return []Filter{{"Open", "open"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"All", "all"}}
 	case Milestones:
 		return []Filter{{"Open", "open"}, {"Closed", "closed"}, {"All", "all"}}
+	case CIRuns:
+		return []Filter{{"All", "all"}, {"In progress", "in_progress"}, {"Queued", "queued"}, {"Success", "success"}, {"Failure", "failure"}}
 	default:
 		return []Filter{{"All", "all"}}
 	}
@@ -89,6 +99,55 @@ type githubPullRequestLink struct {
 	MergedAt *string `json:"merged_at"`
 }
 
+type githubRun struct {
+	ID           int64      `json:"id"`
+	Name         string     `json:"name"`
+	DisplayTitle string     `json:"display_title"`
+	Status       string     `json:"status"`
+	Conclusion   string     `json:"conclusion"`
+	Event        string     `json:"event"`
+	HeadBranch   string     `json:"head_branch"`
+	HeadSHA      string     `json:"head_sha"`
+	RunAttempt   int        `json:"run_attempt"`
+	CreatedAt    string     `json:"created_at"`
+	UpdatedAt    string     `json:"updated_at"`
+	HTMLURL      string     `json:"html_url"`
+	Actor        githubUser `json:"actor"`
+}
+
+type githubJob struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	Steps      []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"steps"`
+}
+
+func (r githubRun) item() Item {
+	title := r.DisplayTitle
+	if title == "" {
+		title = r.Name
+	}
+	state := r.Status
+	if r.Conclusion != "" {
+		state += "/" + r.Conclusion
+	}
+	meta := r.Name
+	if r.HeadBranch != "" {
+		meta += " · " + r.HeadBranch
+	}
+	if r.Event != "" {
+		meta += " · " + r.Event
+	}
+	if r.RunAttempt > 1 {
+		meta += fmt.Sprintf(" · attempt %d", r.RunAttempt)
+	}
+	return Item{ID: strconv.FormatInt(r.ID, 10), Title: title, State: state, Author: r.Actor.Login, HeadSHA: r.HeadSHA, UpdatedAt: parseTime(r.UpdatedAt), Meta: meta, URL: r.HTMLURL}
+}
+
 type githubItem struct {
 	Number      int           `json:"number"`
 	Title       string        `json:"title"`
@@ -112,6 +171,7 @@ type githubItem struct {
 	} `json:"head"`
 	Base struct {
 		Ref string `json:"ref"`
+		SHA string `json:"sha"`
 	} `json:"base"`
 	PullRequest *githubPullRequestLink `json:"pull_request"`
 }
@@ -267,6 +327,26 @@ func (g *GitHub) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 			items = append(items, entry.item())
 		}
 		return items, nil
+	case CIRuns:
+		fields := []string{"per_page=100"}
+		if filter.Value != "" && filter.Value != "all" {
+			fields = append(fields, "status="+filter.Value)
+		}
+		data, err := g.api(ctx, "GET", "repos/"+g.repo+"/actions/runs", fields...)
+		if err != nil {
+			return nil, err
+		}
+		var raw struct {
+			Runs []githubRun `json:"workflow_runs"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, fmt.Errorf("decode GitHub Actions runs: %w", err)
+		}
+		items := make([]Item, 0, len(raw.Runs))
+		for _, run := range raw.Runs {
+			items = append(items, run.item())
+		}
+		return items, nil
 	default:
 		return nil, fmt.Errorf("unsupported GitHub list kind: %s", kind)
 	}
@@ -311,6 +391,38 @@ type githubComment struct {
 	State     string     `json:"state"`
 }
 
+type githubReviewComment struct {
+	ID            int64      `json:"id"`
+	InReplyToID   *int64     `json:"in_reply_to_id"`
+	Body          string     `json:"body"`
+	User          githubUser `json:"user"`
+	CreatedAt     string     `json:"created_at"`
+	Path          string     `json:"path"`
+	Line          *int       `json:"line"`
+	OriginalLine  *int       `json:"original_line"`
+	StartLine     *int       `json:"start_line"`
+	OriginalStart *int       `json:"original_start_line"`
+	Side          string     `json:"side"`
+	StartSide     string     `json:"start_side"`
+	SubjectType   string     `json:"subject_type"`
+}
+
+type githubReviewThreadInfo struct {
+	ID         string
+	Resolved   bool
+	Resolvable bool
+	CanReply   bool
+}
+
+type githubCommitComment struct {
+	Body      string     `json:"body"`
+	User      githubUser `json:"user"`
+	CreatedAt string     `json:"created_at"`
+	Path      string     `json:"path"`
+	Position  *int       `json:"position"`
+	Line      *int       `json:"line"`
+}
+
 type githubCommit struct {
 	SHA     string `json:"sha"`
 	HTMLURL string `json:"html_url"`
@@ -326,10 +438,15 @@ type githubCommit struct {
 		Deletions int `json:"deletions"`
 		Total     int `json:"total"`
 	} `json:"stats"`
+	Parents []struct {
+		SHA string `json:"sha"`
+	} `json:"parents"`
 	Files []struct {
-		Filename string `json:"filename"`
-		Status   string `json:"status"`
-		Changes  int    `json:"changes"`
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
+		Status           string `json:"status"`
+		Changes          int    `json:"changes"`
+		Patch            string `json:"patch"`
 	} `json:"files"`
 }
 
@@ -367,6 +484,11 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 		}
 		if kind == PullRequests {
 			detail.Sections = append(detail.Sections, Section{Title: "Changes", Markdown: fmt.Sprintf("`%s` → `%s` · **%d** commits · **%d** files · +%d / -%d", raw.Head.Ref, raw.Base.Ref, raw.CommitCount, raw.Changed, raw.Additions, raw.Deletions)})
+			files, err := g.githubPullRequestDiffs(ctx, item.ID, raw.Base.SHA, raw.Head.SHA)
+			if err != nil {
+				return Detail{}, err
+			}
+			detail.Diffs = files
 		}
 		comments, err := g.githubComments(ctx, item.ID, kind == PullRequests)
 		if err != nil {
@@ -378,7 +500,7 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			if inlineErr != nil {
 				return Detail{}, inlineErr
 			}
-			detail.Sections = append(detail.Sections, inline...)
+			detail.Sections = append(detail.Sections, attachDiffReviews(detail.Diffs, inline)...)
 		}
 		updates, err := g.githubUpdates(ctx, item.ID)
 		if err != nil {
@@ -445,13 +567,221 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			return Detail{}, fmt.Errorf("decode GitHub commit: %w", err)
 		}
 		files := make([]string, 0, len(raw.Files))
+		diffs := make([]DiffFile, 0, len(raw.Files))
+		baseSHA := ""
+		if len(raw.Parents) > 0 {
+			baseSHA = raw.Parents[0].SHA
+		}
 		for _, file := range raw.Files {
 			files = append(files, fmt.Sprintf("- `%s` · %s · %d changes", file.Filename, file.Status, file.Changes))
+			oldPath := file.PreviousFilename
+			if oldPath == "" {
+				oldPath = file.Filename
+			}
+			diffs = append(diffs, DiffFile{
+				OldPath:  oldPath,
+				NewPath:  file.Filename,
+				Lines:    ParseUnifiedDiffLines(file.Patch),
+				TooLarge: file.Patch == "",
+				BaseSHA:  baseSHA,
+				HeadSHA:  raw.SHA,
+			})
 		}
-		return Detail{Item: raw.item(), Body: raw.Commit.Message, Sections: []Section{{Title: "Stats", Markdown: fmt.Sprintf("**%d** files changed · +%d / -%d", len(raw.Files), raw.Stats.Additions, raw.Stats.Deletions)}, {Title: "Files", Markdown: strings.Join(files, "\n")}}}, nil
+		detail := Detail{Item: raw.item(), Body: raw.Commit.Message, Sections: []Section{{Title: "Stats", Markdown: fmt.Sprintf("**%d** files changed · +%d / -%d", len(raw.Files), raw.Stats.Additions, raw.Stats.Deletions)}, {Title: "Files", Markdown: strings.Join(files, "\n")}}, Diffs: diffs}
+		comments, err := g.githubCommitComments(ctx, item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		detail.Sections = append(detail.Sections, attachDiffReviews(detail.Diffs, githubCommitPositionedComments(detail.Diffs, comments))...)
+		return detail, nil
+	case CIRuns:
+		data, err := g.api(ctx, "GET", "repos/"+g.repo+"/actions/runs/"+item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		var raw githubRun
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return Detail{}, fmt.Errorf("decode GitHub Actions run: %w", err)
+		}
+		detail := Detail{
+			Item: raw.item(),
+			Body: fmt.Sprintf("- Workflow: **%s**\n- Event: `%s`\n- Branch: `%s`\n- Commit: `%s`\n- Attempt: **%d**", raw.Name, raw.Event, raw.HeadBranch, raw.HeadSHA, raw.RunAttempt),
+		}
+		jobData, jobErr := g.api(ctx, "GET", "repos/"+g.repo+"/actions/runs/"+item.ID+"/jobs", "per_page=100")
+		if jobErr != nil {
+			detail.Sections = append(detail.Sections, Section{Title: "Jobs", Markdown: "_Job summary unavailable._"})
+		} else {
+			var response struct {
+				Jobs []githubJob `json:"jobs"`
+			}
+			if err := json.Unmarshal(jobData, &response); err != nil {
+				detail.Sections = append(detail.Sections, Section{Title: "Jobs", Markdown: "_Job summary unavailable._"})
+			} else {
+				var summaries []string
+				for _, job := range response.Jobs {
+					state := job.Status
+					if job.Conclusion != "" {
+						state += "/" + job.Conclusion
+					}
+					summaries = append(summaries, "- **"+job.Name+"** · "+state)
+					for _, step := range job.Steps {
+						stepState := step.Status
+						if step.Conclusion != "" {
+							stepState += "/" + step.Conclusion
+						}
+						summaries = append(summaries, "  - "+step.Name+" · "+stepState)
+					}
+				}
+				if len(summaries) > 0 {
+					detail.Sections = append(detail.Sections, Section{Title: "Jobs", Markdown: strings.Join(summaries, "\n")})
+				}
+			}
+		}
+		if raw.Status != "completed" {
+			return detail, nil
+		}
+		logs, err := g.api(ctx, "GET", "repos/"+g.repo+"/actions/runs/"+item.ID+"/logs")
+		if err != nil {
+			detail.Sections = append(detail.Sections, Section{Title: "Logs", Markdown: "_Logs unavailable._"})
+			return detail, nil
+		}
+		logSections, err := githubLogSections(logs)
+		if err != nil {
+			detail.Sections = append(detail.Sections, Section{Title: "Logs", Markdown: "_Logs unavailable._"})
+			return detail, nil
+		}
+		detail.Sections = append(detail.Sections, logSections...)
+		return detail, nil
 	default:
 		return Detail{}, fmt.Errorf("unsupported GitHub detail kind: %s", kind)
 	}
+}
+
+func githubLogSections(data []byte) ([]Section, error) {
+	archive, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("decode GitHub Actions logs: %w", err)
+	}
+	sections := make([]Section, 0, len(archive.File))
+	for _, file := range archive.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open GitHub Actions log %q: %w", file.Name, err)
+		}
+		contents, readErr := io.ReadAll(io.LimitReader(reader, maxCILogBytes+1))
+		closeErr := reader.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read GitHub Actions log %q: %w", file.Name, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close GitHub Actions log %q: %w", file.Name, closeErr)
+		}
+		sections = append(sections, Section{Title: "Logs · " + file.Name, Markdown: ciLogMarkdown(contents)})
+	}
+	return sections, nil
+}
+
+func (g *GitHub) githubCommitComments(ctx context.Context, sha string) ([]githubCommitComment, error) {
+	data, err := g.api(ctx, "GET", "repos/"+g.repo+"/commits/"+sha+"/comments", "per_page=100")
+	if err != nil {
+		return nil, err
+	}
+	var comments []githubCommitComment
+	if err := json.Unmarshal(data, &comments); err != nil {
+		return nil, fmt.Errorf("decode GitHub commit comments: %w", err)
+	}
+	return comments, nil
+}
+
+func githubCommitPositionedComments(diffs []DiffFile, comments []githubCommitComment) []positionedDiffReview {
+	positioned := make([]positionedDiffReview, 0, len(comments))
+	for _, comment := range comments {
+		review := DiffReview{Author: comment.User.Login, Body: comment.Body, CreatedAt: parseTime(comment.CreatedAt)}
+		if line, ok := githubCommitCommentLine(diffs, comment); ok {
+			if line.NewLine > 0 {
+				review.NewLine = line.NewLine
+				review.Side = ReviewSideNew
+			} else {
+				review.OldLine = line.OldLine
+				review.Side = ReviewSideOld
+			}
+		}
+		location := "commit"
+		if comment.Path != "" {
+			location = "`" + comment.Path + "`"
+			if comment.Line != nil {
+				location += fmt.Sprintf(":%d", *comment.Line)
+			}
+		}
+		positioned = append(positioned, positionedDiffReview{
+			OldPath: comment.Path,
+			NewPath: comment.Path,
+			Review:  review,
+			Fallback: Section{
+				Title:    "Commit comment · @" + comment.User.Login + " · " + location + " · " + displayTime(parseTime(comment.CreatedAt)),
+				Markdown: comment.Body,
+			},
+		})
+	}
+	return positioned
+}
+
+func githubCommitCommentLine(diffs []DiffFile, comment githubCommitComment) (DiffLine, bool) {
+	for _, file := range diffs {
+		if comment.Path != file.NewPath && comment.Path != file.OldPath {
+			continue
+		}
+		for _, line := range file.Lines {
+			matchesPosition := comment.Position != nil && line.Position == *comment.Position
+			matchesLine := comment.Position == nil && comment.Line != nil && (line.NewLine == *comment.Line || line.OldLine == *comment.Line)
+			if matchesPosition || matchesLine {
+				return line, true
+			}
+		}
+	}
+	return DiffLine{}, false
+}
+
+func (g *GitHub) githubPullRequestDiffs(ctx context.Context, id, baseSHA, headSHA string) ([]DiffFile, error) {
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	endpoint := "repos/" + g.repo + "/pulls/" + id + "/files?per_page=100"
+	data, err := g.runner.Run(ctx, "gh", "api", "--hostname", host, "--method", "GET", endpoint, "--paginate", "--slurp")
+	if err != nil {
+		return nil, err
+	}
+	type githubDiffFile struct {
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
+		Patch            string `json:"patch"`
+	}
+	var pages [][]githubDiffFile
+	if err := json.Unmarshal(data, &pages); err != nil {
+		return nil, fmt.Errorf("decode GitHub pull request files: %w", err)
+	}
+	var diffs []DiffFile
+	for _, page := range pages {
+		for _, file := range page {
+			oldPath := file.PreviousFilename
+			if oldPath == "" {
+				oldPath = file.Filename
+			}
+			diffs = append(diffs, DiffFile{
+				OldPath:  oldPath,
+				NewPath:  file.Filename,
+				Lines:    ParseUnifiedDiffLines(file.Patch),
+				TooLarge: file.Patch == "",
+				BaseSHA:  baseSHA,
+				HeadSHA:  headSHA,
+			})
+		}
+	}
+	return diffs, nil
 }
 
 func (g *GitHub) githubComments(ctx context.Context, id string, includeReviews bool) ([]Section, error) {
@@ -492,30 +822,167 @@ func (g *GitHub) githubComments(ctx context.Context, id string, includeReviews b
 	return sections, nil
 }
 
-func (g *GitHub) githubReviewComments(ctx context.Context, id string) ([]Section, error) {
-	data, err := g.api(ctx, "GET", "repos/"+g.repo+"/pulls/"+id+"/comments", "per_page=100")
+func (g *GitHub) githubReviewComments(ctx context.Context, id string) ([]positionedDiffReview, error) {
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	endpoint := "repos/" + g.repo + "/pulls/" + id + "/comments?per_page=100"
+	data, err := g.runner.Run(ctx, "gh", "api", "--hostname", host, "--method", "GET", endpoint, "--paginate", "--slurp")
 	if err != nil {
 		return nil, err
 	}
-	var comments []struct {
-		Body      string     `json:"body"`
-		User      githubUser `json:"user"`
-		CreatedAt string     `json:"created_at"`
-		Path      string     `json:"path"`
-		Line      *int       `json:"line"`
-	}
-	if err := json.Unmarshal(data, &comments); err != nil {
+	var comments []githubReviewComment
+	var pages [][]githubReviewComment
+	if err := json.Unmarshal(data, &pages); err == nil {
+		for _, page := range pages {
+			comments = append(comments, page...)
+		}
+	} else if err := json.Unmarshal(data, &comments); err != nil {
 		return nil, fmt.Errorf("decode GitHub review comments: %w", err)
 	}
-	sections := make([]Section, 0, len(comments))
+	if len(comments) == 0 {
+		return nil, nil
+	}
+	threadInfo, err := g.githubReviewThreads(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("load GitHub review thread capabilities: %w", err)
+	}
+	return githubPositionedReviews(comments, threadInfo), nil
+}
+
+func githubPositionedReviews(comments []githubReviewComment, threadInfo map[int64]githubReviewThreadInfo) []positionedDiffReview {
+	reviews := make([]positionedDiffReview, 0, len(comments))
 	for _, comment := range comments {
 		location := "`" + comment.Path + "`"
-		if comment.Line != nil {
-			location += fmt.Sprintf(":%d", *comment.Line)
+		line := comment.Line
+		fileLevel := strings.EqualFold(comment.SubjectType, "file")
+		outdated := line == nil && !fileLevel
+		if line == nil {
+			line = comment.OriginalLine
 		}
-		sections = append(sections, Section{Title: "Inline comment · @" + comment.User.Login + " · " + location + " · " + displayTime(parseTime(comment.CreatedAt)), Markdown: comment.Body})
+		startLine := comment.StartLine
+		if startLine == nil {
+			startLine = comment.OriginalStart
+		}
+		side := ReviewSideNew
+		if strings.EqualFold(comment.Side, "LEFT") {
+			side = ReviewSideOld
+		}
+		replyToID := comment.ID
+		if comment.InReplyToID != nil {
+			replyToID = *comment.InReplyToID
+		}
+		commentID := ""
+		if comment.ID > 0 {
+			commentID = strconv.FormatInt(comment.ID, 10)
+		}
+		replyID := ""
+		if replyToID > 0 {
+			replyID = strconv.FormatInt(replyToID, 10)
+		}
+		thread := threadInfo[comment.ID]
+		if thread.ID == "" && comment.InReplyToID != nil {
+			thread = threadInfo[*comment.InReplyToID]
+		}
+		review := DiffReview{
+			ID:         commentID,
+			ThreadID:   thread.ID,
+			ReplyToID:  replyID,
+			Author:     comment.User.Login,
+			Body:       comment.Body,
+			CreatedAt:  parseTime(comment.CreatedAt),
+			Side:       side,
+			Outdated:   outdated,
+			FileLevel:  fileLevel,
+			Resolved:   thread.Resolved,
+			Resolvable: thread.Resolvable,
+			Replyable:  thread.CanReply,
+		}
+		if line != nil {
+			location += fmt.Sprintf(":%d", *line)
+			if side == ReviewSideOld {
+				review.OldLine = *line
+			} else {
+				review.NewLine = *line
+			}
+		}
+		if startLine != nil {
+			startSide := side
+			if strings.EqualFold(comment.StartSide, "LEFT") {
+				startSide = ReviewSideOld
+			}
+			if startSide == ReviewSideOld {
+				review.StartOldLine = *startLine
+			} else {
+				review.StartNewLine = *startLine
+			}
+		}
+		reviews = append(reviews, positionedDiffReview{
+			OldPath: comment.Path,
+			NewPath: comment.Path,
+			Review:  review,
+			Fallback: Section{
+				Title:    "Inline comment · @" + comment.User.Login + " · " + location + " · " + displayTime(parseTime(comment.CreatedAt)),
+				Markdown: comment.Body,
+			},
+		})
 	}
-	return sections, nil
+	return reviews
+}
+
+func (g *GitHub) githubReviewThreads(ctx context.Context, id string) (map[int64]githubReviewThreadInfo, error) {
+	owner, name, ok := strings.Cut(g.repo, "/")
+	if !ok || owner == "" || name == "" {
+		return nil, fmt.Errorf("invalid GitHub repository %q", g.repo)
+	}
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	query := `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{id isResolved viewerCanResolve viewerCanReply comments(first:100){nodes{databaseId}}}pageInfo{hasNextPage endCursor}}}}}`
+	data, err := g.runner.Run(ctx, "gh", "api", "graphql", "--hostname", host, "--method", "POST", "--paginate", "--slurp", "-f", "query="+query, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+id)
+	if err != nil {
+		return nil, err
+	}
+	type page struct {
+		Data struct {
+			Repository struct {
+				PullRequest struct {
+					ReviewThreads struct {
+						Nodes []struct {
+							ID               string `json:"id"`
+							IsResolved       bool   `json:"isResolved"`
+							ViewerCanResolve bool   `json:"viewerCanResolve"`
+							ViewerCanReply   bool   `json:"viewerCanReply"`
+							Comments         struct {
+								Nodes []struct {
+									DatabaseID int64 `json:"databaseId"`
+								} `json:"nodes"`
+							} `json:"comments"`
+						} `json:"nodes"`
+					} `json:"reviewThreads"`
+				} `json:"pullRequest"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	var pages []page
+	if err := json.Unmarshal(data, &pages); err != nil {
+		var single page
+		if singleErr := json.Unmarshal(data, &single); singleErr != nil {
+			return nil, fmt.Errorf("decode GitHub review threads: %w", err)
+		}
+		pages = []page{single}
+	}
+	info := make(map[int64]githubReviewThreadInfo)
+	for _, current := range pages {
+		for _, thread := range current.Data.Repository.PullRequest.ReviewThreads.Nodes {
+			for _, comment := range thread.Comments.Nodes {
+				info[comment.DatabaseID] = githubReviewThreadInfo{ID: thread.ID, Resolved: thread.IsResolved, Resolvable: thread.ViewerCanResolve, CanReply: thread.ViewerCanReply}
+			}
+		}
+	}
+	return info, nil
 }
 
 func (g *GitHub) githubUpdates(ctx context.Context, id string) ([]Section, error) {
@@ -563,6 +1030,128 @@ func (g *GitHub) Merge(ctx context.Context, item Item) error {
 	}
 	fields := []string{"merge_method=merge", "sha=" + item.HeadSHA}
 	_, err := g.api(ctx, "PUT", "repos/"+g.repo+"/pulls/"+item.ID+"/merge", fields...)
+	return err
+}
+
+func (g *GitHub) CancelRun(ctx context.Context, item Item) error {
+	if err := requireItem(CIRuns, item); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "repos/"+g.repo+"/actions/runs/"+item.ID+"/cancel")
+	return err
+}
+
+func (g *GitHub) Rerun(ctx context.Context, item Item) error {
+	if err := requireItem(CIRuns, item); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "repos/"+g.repo+"/actions/runs/"+item.ID+"/rerun")
+	return err
+}
+
+func (g *GitHub) AddComment(ctx context.Context, kind Kind, item Item, body string) error {
+	if err := requireCommentable(kind, item, body); err != nil {
+		return err
+	}
+	if kind == Commits {
+		_, err := g.api(ctx, "POST", "repos/"+g.repo+"/commits/"+item.ID+"/comments", "body="+body)
+		return err
+	}
+	_, err := g.api(ctx, "POST", "repos/"+g.repo+"/issues/"+item.ID+"/comments", "body="+body)
+	return err
+}
+
+func (g *GitHub) AddReview(ctx context.Context, item Item, body string) error {
+	if err := requireReview(item, body); err != nil {
+		return err
+	}
+	_, err := g.api(ctx, "POST", "repos/"+g.repo+"/pulls/"+item.ID+"/reviews", "body="+body, "event=COMMENT")
+	return err
+}
+
+func (g *GitHub) AddReviewComment(ctx context.Context, item Item, target ReviewTarget, body string) error {
+	if err := requireReviewComment(item, target, body); err != nil {
+		return err
+	}
+	path := target.NewPath
+	line, side := target.NewLine, "RIGHT"
+	if target.reviewSide() == ReviewSideOld {
+		line, side = target.OldLine, "LEFT"
+	}
+	if path == "" {
+		path = target.OldPath
+	}
+	if path == "" {
+		return fmt.Errorf("review target has no %s path", strings.ToLower(side))
+	}
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	args := []string{
+		"api", "--hostname", host, "--method", "POST", "repos/" + g.repo + "/pulls/" + item.ID + "/comments",
+		"-f", "body=" + body,
+		"-f", "commit_id=" + target.HeadSHA,
+		"-f", "path=" + path,
+	}
+	if target.IsRange() {
+		startLine := target.StartNewLine
+		if target.reviewSide() == ReviewSideOld {
+			startLine = target.StartOldLine
+		}
+		args = append(args, "-F", "start_line="+strconv.Itoa(startLine), "-f", "start_side="+side)
+	}
+	args = append(args, "-F", "line="+strconv.Itoa(line), "-f", "side="+side)
+	_, err := g.runner.Run(ctx, "gh", args...)
+	return err
+}
+
+func (g *GitHub) AddCommitComment(ctx context.Context, item Item, target ReviewTarget, body string) error {
+	if err := requireCommitComment(item, target, body); err != nil {
+		return err
+	}
+	if target.Position <= 0 {
+		return fmt.Errorf("GitHub commit comment target has no diff position")
+	}
+	path := target.NewPath
+	if path == "" {
+		path = target.OldPath
+	}
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	_, err := g.runner.Run(ctx, "gh",
+		"api", "--hostname", host, "--method", "POST", "repos/"+g.repo+"/commits/"+item.ID+"/comments",
+		"-f", "body="+body,
+		"-f", "path="+path,
+		"-F", "position="+strconv.Itoa(target.Position),
+	)
+	return err
+}
+
+func (g *GitHub) AddReviewReply(ctx context.Context, item Item, target ReviewThreadTarget, body string) error {
+	if err := requireReviewReply(item, target, body); err != nil {
+		return err
+	}
+	if target.ReplyToID == "" {
+		return fmt.Errorf("GitHub review reply has no root comment ID")
+	}
+	endpoint := "repos/" + g.repo + "/pulls/" + item.ID + "/comments/" + url.PathEscape(target.ReplyToID) + "/replies"
+	_, err := g.api(ctx, "POST", endpoint, "body="+body)
+	return err
+}
+
+func (g *GitHub) ResolveReview(ctx context.Context, item Item, target ReviewThreadTarget) error {
+	if err := requireResolvableReview(item, target); err != nil {
+		return err
+	}
+	host := g.host
+	if host == "" {
+		host = "github.com"
+	}
+	query := `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}`
+	_, err := g.runner.Run(ctx, "gh", "api", "graphql", "--hostname", host, "--method", "POST", "-f", "query="+query, "-f", "threadId="+target.ThreadID)
 	return err
 }
 

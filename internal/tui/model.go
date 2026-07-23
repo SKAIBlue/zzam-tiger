@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -21,6 +22,17 @@ const (
 	listScreen screen = iota
 	detailScreen
 	labelScreen
+	diffScreen
+	commentScreen
+)
+
+type commentMode int
+
+const (
+	generalComment commentMode = iota
+	generalReview
+	inlineReview
+	reviewReply
 )
 
 var kinds = []provider.Kind{
@@ -29,6 +41,7 @@ var kinds = []provider.Kind{
 	provider.Milestones,
 	provider.Branches,
 	provider.Commits,
+	provider.CIRuns,
 }
 
 type listResultMsg struct {
@@ -71,6 +84,21 @@ type Model struct {
 	detail   provider.Detail
 	viewport viewport.Model
 	labels   textinput.Model
+	comment  textarea.Model
+
+	commentMode      commentMode
+	commentItem      provider.Item
+	commentKind      provider.Kind
+	commentTarget    provider.ReviewTarget
+	commentTargetSet bool
+	commentThread    provider.ReviewThreadTarget
+	commentOrigin    screen
+	diffFile         int
+	diffLine         int
+	diffAnchor       int
+	diffDragging     bool
+	detailDiffActive bool
+	selectedReview   int
 
 	listRequest   uint64
 	detailRequest uint64
@@ -87,19 +115,28 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	labels.Prompt = "Labels (comma separated): "
 	labels.CharLimit = 500
 	labels.Width = 50
+	comment := textarea.New()
+	comment.Placeholder = "Write Markdown…"
+	comment.ShowLineNumbers = false
+	comment.SetWidth(66)
+	comment.SetHeight(8)
 
 	model := Model{
-		backend:     backend,
-		refresh:     refresh,
-		filterIndex: make(map[provider.Kind]int),
-		items:       make(map[provider.Kind][]provider.Item),
-		cursor:      make(map[provider.Kind]int),
-		offset:      make(map[provider.Kind]int),
-		viewport:    viewport.New(80, 20),
-		labels:      labels,
-		listRequest: 1,
-		loadingList: true,
-		lastUpdated: time.Time{},
+		backend:        backend,
+		refresh:        refresh,
+		filterIndex:    make(map[provider.Kind]int),
+		items:          make(map[provider.Kind][]provider.Item),
+		cursor:         make(map[provider.Kind]int),
+		offset:         make(map[provider.Kind]int),
+		viewport:       viewport.New(80, 20),
+		labels:         labels,
+		comment:        comment,
+		diffLine:       -1,
+		diffAnchor:     -1,
+		selectedReview: -1,
+		listRequest:    1,
+		loadingList:    true,
+		lastUpdated:    time.Time{},
 	}
 	return model
 }
@@ -178,7 +215,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resizeViewport()
-		if m.detail.Item.ID != "" {
+		if m.screen == diffScreen || m.commentUsesDiffBackground() {
+			m.setDiffContent()
+		} else if m.detail.Item.ID != "" {
 			m.setDetailContent()
 		}
 		return m, nil
@@ -210,9 +249,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.screen == diffScreen || m.commentUsesDiffBackground() {
+			m.diffAnchor = -1
+			m.diffDragging = false
+		}
 		m.detail = msg.detail
 		m.selected = msg.detail.Item
-		m.setDetailContent()
+		m.clampDiffSelection()
+		if m.screen == diffScreen || m.commentUsesDiffBackground() {
+			m.setDiffContent()
+		} else {
+			m.setDetailContent()
+		}
 		m.lastUpdated = time.Now()
 		m.err = nil
 		return m, nil
@@ -222,10 +270,23 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.err = msg.err
 			m.status = msg.action + " failed"
+			if m.screen == commentScreen {
+				return m, m.comment.Focus()
+			}
 			return m, nil
 		}
 		m.status = msg.action + " completed"
 		m.err = nil
+		if m.screen == commentScreen {
+			m.comment.Blur()
+			m.screen = m.commentOrigin
+			if m.screen != detailScreen && m.screen != diffScreen {
+				m.screen = detailScreen
+			}
+			m.diffAnchor = -1
+			m.diffDragging = false
+			m.detailDiffActive = false
+		}
 		m.loadingList = false
 		m.loadingDetail = false
 		if m.screen == listScreen {
@@ -259,13 +320,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == labelScreen {
 			return m.updateLabelInput(msg)
 		}
+		if m.screen == commentScreen {
+			return m.updateCommentInput(msg)
+		}
+		if m.screen == diffScreen {
+			return m.updateDiff(msg)
+		}
 		if m.screen == detailScreen {
 			return m.updateDetail(msg)
 		}
 		return m.updateList(msg)
 	}
 
-	if m.screen == detailScreen {
+	if m.screen == commentScreen {
+		var cmd tea.Cmd
+		m.comment, cmd = m.comment.Update(message)
+		return m, cmd
+	}
+	if m.screen == detailScreen || m.screen == diffScreen {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(message)
 		return m, cmd
@@ -293,13 +365,13 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.status = ""
 		m.loadingList = false
 		return m.startListLoad()
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4", "5", "6":
 		m.active = int(msg.Runes[0] - '1')
 		m.status = ""
 		m.loadingList = false
 		return m.startListLoad()
-	case "!", "@", "#", "$", "%":
-		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4}
+	case "!", "@", "#", "$", "%", "^":
+		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5}
 		m.active = shiftTabs[msg.String()]
 		m.status = ""
 		m.loadingList = false
@@ -339,6 +411,14 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if item, ok := m.currentListItem(); ok && assignableKind(m.kind()) {
 			return m.startAssignmentAction(item, false)
 		}
+	case "x", "X":
+		if item, ok := m.currentListItem(); ok && m.kind() == provider.CIRuns {
+			return m.startRunAction(item, false)
+		}
+	case "R":
+		if item, ok := m.currentListItem(); ok && m.kind() == provider.CIRuns {
+			return m.startRunAction(item, true)
+		}
 	case "r":
 		m.loadingList = false
 		return m.startListLoad()
@@ -354,7 +434,7 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch msg.String() {
-	case "esc", "backspace":
+	case "esc":
 		m.screen = listScreen
 		m.detail = provider.Detail{}
 		m.loadingList = false
@@ -376,6 +456,24 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.loadingDetail = false
 		return m.startDetailLoad()
+	case "n", "N":
+		if (m.kind() == provider.PullRequests || m.kind() == provider.Issues || m.kind() == provider.Commits) && m.detailReady() {
+			return m.openCommentEditor(generalComment)
+		}
+	case "R":
+		if m.kind() == provider.PullRequests && m.detailReady() {
+			return m.openCommentEditor(generalReview)
+		}
+		if m.kind() == provider.CIRuns && m.detailReady() {
+			return m.startRunAction(m.selected, true)
+		}
+	case "d", "D":
+		if diffCommentableKind(m.kind()) && m.detailReady() {
+			m.screen = diffScreen
+			m.clampDiffSelection()
+			m.setDiffContent()
+			return m, nil
+		}
 	case "m", "M":
 		if m.kind() == provider.PullRequests && m.detailReady() && m.selected.HeadSHA != "" && !m.actionBusy {
 			m.actionBusy = true
@@ -406,6 +504,72 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.labels.CursorEnd()
 			return m, m.labels.Focus()
 		}
+	case "x", "X":
+		if m.kind() == provider.CIRuns && m.detailReady() {
+			return m.startRunAction(m.selected, false)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	m.diffDragging = false
+	switch msg.String() {
+	case "esc":
+		if m.diffAnchor >= 0 {
+			m.diffAnchor = -1
+			m.status = "range selection cancelled"
+			m.setDiffContent()
+			return m, nil
+		}
+		m.screen = detailScreen
+		m.setDetailContent()
+		return m, nil
+	case "q":
+		return m, tea.Quit
+	case "left", "h":
+		m.moveDiffFile(-1)
+	case "right", "l":
+		m.moveDiffFile(1)
+	case "up", "k":
+		m.moveDiffLine(-1)
+	case "down", "j":
+		m.moveDiffLine(1)
+	case "v", "V":
+		if m.kind() == provider.Commits {
+			m.diffAnchor = -1
+			m.status = "commit comments support one diff line"
+			m.setDiffContent()
+			return m, nil
+		}
+		if m.diffAnchor >= 0 {
+			m.diffAnchor = -1
+			m.status = "range selection cancelled"
+		} else if m.diffLine >= 0 {
+			m.diffAnchor = m.diffLine
+			m.status = "range selection started"
+		}
+		m.setDiffContent()
+	case "enter":
+		if m.detailReady() {
+			return m.openCommentEditor(inlineReview)
+		}
+	case "p", "P":
+		if review, ok := m.selectedDiffReview(); ok {
+			return m.openReplyEditor(review)
+		}
+		m.status = "no review thread is selected"
+	case "x", "X":
+		if review, ok := m.selectedDiffReview(); ok {
+			return m.startResolveReview(review)
+		}
+		m.status = "no resolvable review is selected"
+	case "r":
+		m.loadingDetail = false
+		return m.startDetailLoad()
 	}
 	return m, nil
 }
@@ -416,6 +580,10 @@ func (m Model) detailReady() bool {
 
 func assignableKind(kind provider.Kind) bool {
 	return kind == provider.PullRequests || kind == provider.Issues
+}
+
+func diffCommentableKind(kind provider.Kind) bool {
+	return kind == provider.PullRequests || kind == provider.Commits
 }
 
 func (m Model) currentListItem() (provider.Item, bool) {
@@ -460,6 +628,22 @@ func (m Model) startAssignmentAction(item provider.Item, assigned bool) (tea.Mod
 	})
 }
 
+func (m Model) startRunAction(item provider.Item, rerun bool) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	m.actionBusy = true
+	action := "cancel run"
+	m.status = "cancelling run…"
+	run := func(ctx context.Context) error { return m.backend.CancelRun(ctx, item) }
+	if rerun {
+		action = "rerun"
+		m.status = "starting rerun…"
+		run = func(ctx context.Context) error { return m.backend.Rerun(ctx, item) }
+	}
+	return m, m.actionCmd(action, run)
+}
+
 func (m Model) updateLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -477,6 +661,127 @@ func (m Model) updateLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.labels, cmd = m.labels.Update(msg)
+	return m, cmd
+}
+
+func (m Model) openCommentEditor(mode commentMode) (tea.Model, tea.Cmd) {
+	m.commentOrigin = m.screen
+	m.commentItem = m.selected
+	m.commentKind = m.kind()
+	m.commentTarget = provider.ReviewTarget{}
+	m.commentTargetSet = false
+	m.commentThread = provider.ReviewThreadTarget{}
+	if mode == inlineReview {
+		target, err := m.selectedReviewTarget()
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		if m.kind() == provider.Commits && target.IsRange() {
+			m.status = "commit comments support one diff line"
+			return m, nil
+		}
+		m.commentTarget = target
+		m.commentTargetSet = true
+		m.diffDragging = false
+	}
+	m.commentMode = mode
+	m.screen = commentScreen
+	m.comment.SetValue("")
+	m.comment.CursorStart()
+	m.err = nil
+	return m, m.comment.Focus()
+}
+
+func (m Model) openReplyEditor(review provider.DiffReview) (tea.Model, tea.Cmd) {
+	if !review.Replyable || review.ThreadID == "" && review.ReplyToID == "" {
+		m.status = "selected review does not support replies"
+		return m, nil
+	}
+	m.commentOrigin = m.screen
+	m.commentMode = reviewReply
+	m.commentItem = m.selected
+	m.commentKind = m.kind()
+	m.commentTarget = provider.ReviewTarget{}
+	m.commentTargetSet = false
+	m.commentThread = provider.ReviewThreadTarget{ThreadID: review.ThreadID, ReplyToID: review.ReplyToID}
+	m.screen = commentScreen
+	m.comment.SetValue("")
+	m.comment.CursorStart()
+	m.err = nil
+	return m, m.comment.Focus()
+}
+
+func (m Model) commentUsesDiffBackground() bool {
+	return m.screen == commentScreen && (m.commentMode == inlineReview || m.commentMode == reviewReply) && m.commentOrigin == diffScreen
+}
+
+func (m Model) updateCommentInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.comment.Blur()
+		m.screen = m.commentOrigin
+		if m.screen == diffScreen {
+			m.setDiffContent()
+		} else {
+			m.screen = detailScreen
+			m.setDetailContent()
+		}
+		m.err = nil
+		return m, nil
+	case "ctrl+s":
+		body := strings.TrimSpace(m.comment.Value())
+		if body == "" {
+			m.err = fmt.Errorf("comment cannot be blank")
+			return m, nil
+		}
+		m.actionBusy = true
+		m.err = nil
+		item := m.commentItem
+		if m.commentMode == inlineReview {
+			if !m.commentTargetSet {
+				m.actionBusy = false
+				m.screen = diffScreen
+				m.err = fmt.Errorf("selected diff line cannot be reviewed")
+				return m, nil
+			}
+			target := m.commentTarget
+			if m.commentKind == provider.Commits {
+				m.status = "submitting commit comment…"
+				return m, m.actionCmd("commit comment", func(ctx context.Context) error {
+					return m.backend.AddCommitComment(ctx, item, target, body)
+				})
+			}
+			m.status = "submitting inline review…"
+			return m, m.actionCmd("inline review", func(ctx context.Context) error {
+				return m.backend.AddReviewComment(ctx, item, target, body)
+			})
+		}
+		if m.commentMode == generalReview {
+			m.status = "submitting review…"
+			return m, m.actionCmd("review", func(ctx context.Context) error {
+				return m.backend.AddReview(ctx, item, body)
+			})
+		}
+		if m.commentMode == reviewReply {
+			target := m.commentThread
+			m.status = "submitting review reply…"
+			return m, m.actionCmd("review reply", func(ctx context.Context) error {
+				return m.backend.AddReviewReply(ctx, item, target, body)
+			})
+		}
+		kind := m.commentKind
+		m.status = "submitting comment…"
+		return m, m.actionCmd("comment", func(ctx context.Context) error {
+			return m.backend.AddComment(ctx, kind, item, body)
+		})
+	}
+	m.err = nil
+	var cmd tea.Cmd
+	m.comment, cmd = m.comment.Update(msg)
 	return m, cmd
 }
 
@@ -513,6 +818,7 @@ func (m Model) openSelected() (tea.Model, tea.Cmd) {
 	m.selected = items[index]
 	m.detail = provider.Detail{}
 	m.viewport.SetContent("")
+	m.diffFile, m.diffLine, m.diffAnchor = 0, -1, -1
 	m.screen = detailScreen
 	m.viewport.GotoTop()
 	m.loadingDetail = false
@@ -579,13 +885,297 @@ func (m *Model) resizeViewport() {
 	if m.labels.Width > width-8 {
 		m.labels.Width = max(10, width-8)
 	}
+	m.comment.SetWidth(min(66, max(20, width-8)))
+	m.comment.SetHeight(min(7, max(3, height/4)))
 }
 
 func (m *Model) setDetailContent() {
-	m.viewport.SetContent(renderDetail(m.detail, m.viewport.Width))
+	selectedLine, anchor := -1, -1
+	if m.detailDiffActive {
+		selectedLine, anchor = m.diffLine, m.diffAnchor
+	}
+	content, _ := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, selectedLine, anchor, m.selectedReview)
+	if diffCommentableKind(m.kind()) && len(m.detail.Diffs) == 0 {
+		content += "\n" + detailBoxStyle.Width(max(12, m.viewport.Width-2)).Render(sectionTitleStyle.Render("Diff")+"\n"+metaStyle.Render("No patch was provided for this change."))
+	}
+	m.viewport.SetContent(content)
+}
+
+func (m *Model) clampDiffSelection() {
+	if len(m.detail.Diffs) == 0 {
+		m.diffFile, m.diffLine, m.diffAnchor = 0, -1, -1
+		m.diffDragging = false
+		return
+	}
+	if m.diffFile < 0 {
+		m.diffFile = 0
+	}
+	if m.diffFile >= len(m.detail.Diffs) {
+		m.diffFile = len(m.detail.Diffs) - 1
+	}
+	lines := m.detail.Diffs[m.diffFile].Lines
+	if len(lines) == 0 {
+		m.diffLine, m.diffAnchor = -1, -1
+		m.diffDragging = false
+		return
+	}
+	if m.diffLine < 0 {
+		m.diffLine = 0
+	}
+	if m.diffLine >= len(lines) {
+		m.diffLine = len(lines) - 1
+	}
+	if m.diffAnchor >= len(lines) {
+		m.diffAnchor = -1
+		m.diffDragging = false
+	}
+}
+
+func (m *Model) moveDiffFile(delta int) {
+	if len(m.detail.Diffs) == 0 {
+		return
+	}
+	next := m.diffFile + delta
+	if next < 0 || next >= len(m.detail.Diffs) {
+		return
+	}
+	m.diffFile = next
+	m.diffLine = -1
+	m.diffAnchor = -1
+	m.diffDragging = false
+	m.selectedReview = -1
+	m.status = ""
+	m.clampDiffSelection()
+	m.setDiffContent()
+}
+
+func (m *Model) moveDiffLine(delta int) {
+	if m.diffFile < 0 || m.diffFile >= len(m.detail.Diffs) {
+		return
+	}
+	lines := m.detail.Diffs[m.diffFile].Lines
+	if len(lines) == 0 {
+		return
+	}
+	next := m.diffLine + delta
+	if next < 0 {
+		next = 0
+	}
+	if next >= len(lines) {
+		next = len(lines) - 1
+	}
+	m.diffLine = next
+	m.selectedReview = -1
+	m.status = ""
+	m.setDiffContent()
+}
+
+func (m Model) selectedDiffReview() (provider.DiffReview, bool) {
+	if m.diffFile < 0 || m.diffFile >= len(m.detail.Diffs) {
+		return provider.DiffReview{}, false
+	}
+	file := m.detail.Diffs[m.diffFile]
+	if m.selectedReview >= 0 && m.selectedReview < len(file.Reviews) {
+		return file.Reviews[m.selectedReview], true
+	}
+	if m.diffLine < 0 || m.diffLine >= len(file.Lines) {
+		return provider.DiffReview{}, false
+	}
+	line := file.Lines[m.diffLine]
+	for _, review := range file.Reviews {
+		for _, matched := range reviewsEndingAt([]provider.DiffReview{review}, line) {
+			_ = matched
+			return review, true
+		}
+	}
+	return provider.DiffReview{}, false
+}
+
+func (m Model) startResolveReview(review provider.DiffReview) (tea.Model, tea.Cmd) {
+	if review.Resolved {
+		m.status = "review thread is already resolved"
+		return m, nil
+	}
+	if !review.Resolvable || review.ThreadID == "" {
+		m.status = "selected review cannot be resolved"
+		return m, nil
+	}
+	m.actionBusy = true
+	m.status = "resolving review thread…"
+	item := m.selected
+	target := provider.ReviewThreadTarget{ThreadID: review.ThreadID, ReplyToID: review.ReplyToID}
+	return m, m.actionCmd("resolve review", func(ctx context.Context) error {
+		return m.backend.ResolveReview(ctx, item, target)
+	})
+}
+
+func (m Model) selectedReviewTarget() (provider.ReviewTarget, error) {
+	if m.diffFile < 0 || m.diffFile >= len(m.detail.Diffs) {
+		return provider.ReviewTarget{}, fmt.Errorf("no diff file is selected")
+	}
+	file := m.detail.Diffs[m.diffFile]
+	if m.diffLine < 0 || m.diffLine >= len(file.Lines) {
+		return provider.ReviewTarget{}, fmt.Errorf("no reviewable diff line is selected")
+	}
+	startIndex, endIndex := m.diffLine, m.diffLine
+	if m.diffAnchor >= 0 {
+		startIndex = min(m.diffAnchor, m.diffLine)
+		endIndex = max(m.diffAnchor, m.diffLine)
+	}
+	selected := file.Lines[startIndex : endIndex+1]
+	allNew, allOld := true, true
+	for _, line := range selected {
+		allNew = allNew && line.NewLine > 0
+		allOld = allOld && line.OldLine > 0
+	}
+	if !allNew && !allOld {
+		return provider.ReviewTarget{}, fmt.Errorf("selected range crosses old and new diff sides")
+	}
+	side := provider.ReviewSideNew
+	if !allNew {
+		side = provider.ReviewSideOld
+	}
+	for index := 1; index < len(selected); index++ {
+		previous, current := selected[index-1], selected[index]
+		if side == provider.ReviewSideNew && current.NewLine != previous.NewLine+1 ||
+			side == provider.ReviewSideOld && current.OldLine != previous.OldLine+1 {
+			return provider.ReviewTarget{}, fmt.Errorf("selected range crosses a diff hunk")
+		}
+	}
+	start, end := selected[0], selected[len(selected)-1]
+	return provider.ReviewTarget{
+		OldPath:          file.OldPath,
+		NewPath:          file.NewPath,
+		StartOldLine:     start.OldLine,
+		StartNewLine:     start.NewLine,
+		OldLine:          end.OldLine,
+		NewLine:          end.NewLine,
+		StartOldPosition: start.OldPosition,
+		StartNewPosition: start.NewPosition,
+		OldPosition:      end.OldPosition,
+		NewPosition:      end.NewPosition,
+		Position:         end.Position,
+		Side:             side,
+		BaseSHA:          file.BaseSHA,
+		StartSHA:         file.StartSHA,
+		HeadSHA:          file.HeadSHA,
+	}, nil
+}
+
+func (m *Model) setDiffContent() {
+	m.viewport.SetContent(renderDiffFileState(m.detail.Diffs, m.diffFile, m.diffLine, m.diffAnchor, m.selectedReview, m.viewport.Width))
+	if m.diffLine >= 0 && m.diffFile >= 0 && m.diffFile < len(m.detail.Diffs) {
+		row := diffContentRowForLine(m.detail.Diffs[m.diffFile], m.diffLine, m.viewport.Width)
+		m.viewport.SetYOffset(max(0, row-m.viewport.Height/2))
+	} else {
+		m.viewport.GotoTop()
+	}
+}
+
+func (m *Model) setDiffContentPreservingOffset() {
+	offset := m.viewport.YOffset
+	m.viewport.SetContent(renderDiffFileState(m.detail.Diffs, m.diffFile, m.diffLine, m.diffAnchor, m.selectedReview, m.viewport.Width))
+	m.viewport.SetYOffset(offset)
+}
+
+func (m *Model) setDetailContentPreservingOffset() {
+	offset := m.viewport.YOffset
+	m.setDetailContent()
+	m.viewport.SetYOffset(offset)
+}
+
+func (m Model) diffHitAtMouse(x, y int) (diffHitRegion, bool) {
+	const viewportTop = 2
+	if m.diffFile < 0 || m.diffFile >= len(m.detail.Diffs) || y < viewportTop || y >= viewportTop+m.viewport.Height {
+		return diffHitRegion{}, false
+	}
+	contentRow := m.viewport.YOffset + y - viewportTop
+	regions := diffFileHitRegions(m.detail.Diffs[m.diffFile], m.diffFile, m.viewport.Width, 0, 0)
+	for index := len(regions) - 1; index >= 0; index-- {
+		if regions[index].Row == contentRow {
+			return regions[index], true
+		}
+	}
+	return diffHitRegion{}, false
+}
+
+func (m Model) detailDiffHitAtMouse(x, y int) (diffHitRegion, bool) {
+	const viewportTop = 2
+	if !diffCommentableKind(m.kind()) || y < viewportTop || y >= viewportTop+m.viewport.Height {
+		return diffHitRegion{}, false
+	}
+	contentRow := m.viewport.YOffset + y - viewportTop
+	_, regions := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, m.diffLine, m.diffAnchor, m.selectedReview)
+	for index := len(regions) - 1; index >= 0; index-- {
+		if regions[index].Row == contentRow {
+			return regions[index], true
+		}
+	}
+	return diffHitRegion{}, false
+}
+
+func resolveButtonHit(hit diffHitRegion, x int) bool {
+	return actionButtonHit(hit.ResolveStart, hit.ResolveEnd, x)
+}
+
+func replyButtonHit(hit diffHitRegion, x int) bool {
+	return actionButtonHit(hit.ReplyStart, hit.ReplyEnd, x)
+}
+
+func actionButtonHit(start, end, x int) bool {
+	return start >= 0 && x >= start-1 && x <= end
+}
+
+func (m Model) diffLineAtMouse(y int) (int, bool) {
+	hit, ok := m.diffHitAtMouse(0, y)
+	if !ok || hit.Line < 0 || hit.Review >= 0 {
+		return -1, false
+	}
+	return hit.Line, true
+}
+
+func diffContentRowForLine(file provider.DiffFile, lineIndex, width int) int {
+	row := diffContentHeaderHeight(file)
+	for index, line := range file.Lines {
+		if index == lineIndex {
+			return row
+		}
+		row++
+		for _, review := range reviewsEndingAt(file.Reviews, line) {
+			row += lipgloss.Height(renderDiffReview(review, width))
+		}
+	}
+	return row
+}
+
+func diffContentHeaderHeight(file provider.DiffFile) int {
+	height := 1
+	if file.OldPath != "" && file.NewPath != "" && file.OldPath != file.NewPath {
+		height++
+	}
+	if file.TooLarge {
+		height++
+	}
+	return height
 }
 
 func renderDetail(detail provider.Detail, width int) string {
+	content, _ := renderDetailLayout(detail, width, -1, -1, -1, -1)
+	return content
+}
+
+type diffHitRegion struct {
+	Row          int
+	File         int
+	Line         int
+	Review       int
+	ResolveStart int
+	ResolveEnd   int
+	ReplyStart   int
+	ReplyEnd     int
+}
+
+func renderDetailLayout(detail provider.Detail, width, selectedFile, selectedLine, rangeAnchor, selectedReview int) (string, []diffHitRegion) {
 	if width < 20 {
 		width = 20
 	}
@@ -595,7 +1185,10 @@ func renderDetail(detail provider.Detail, width int) string {
 		for _, section := range detail.Sections {
 			sections = append(sections, section.Title+"\n"+section.Markdown)
 		}
-		return strings.Join(sections, "\n\n────────────────────\n\n")
+		for index := range detail.Diffs {
+			sections = append(sections, "Diff\n"+renderDiffFile(detail.Diffs, index, -1, -1, width-4))
+		}
+		return strings.Join(sections, "\n\n────────────────────\n\n"), nil
 	}
 	renderMarkdown := func(markdown string) string {
 		if strings.TrimSpace(markdown) == "" {
@@ -612,15 +1205,232 @@ func renderDetail(detail provider.Detail, width int) string {
 	for _, section := range detail.Sections {
 		sections = append(sections, detailBoxStyle.Width(boxWidth).Render(sectionTitleStyle.Render(section.Title)+"\n"+renderMarkdown(section.Markdown)))
 	}
-	return strings.Join(sections, "\n")
+	row := lipgloss.Height(sections[0])
+	for index := 1; index < len(sections); index++ {
+		row += 1 + lipgloss.Height(sections[index])
+	}
+	var hits []diffHitRegion
+	for index := range detail.Diffs {
+		line, anchor, review := -1, -1, -1
+		if index == selectedFile {
+			line, anchor, review = selectedLine, rangeAnchor, selectedReview
+		}
+		contentWidth := boxWidth - 4
+		diffContent := renderDiffFileState(detail.Diffs, index, line, anchor, review, contentWidth)
+		box := detailBoxStyle.Width(boxWidth).Render(sectionTitleStyle.Render("Diff") + "\n" + diffContent)
+		row++
+		boxStart := row
+		sections = append(sections, box)
+		for localRow := 0; localRow < lipgloss.Height(box); localRow++ {
+			hits = append(hits, diffHitRegion{Row: boxStart + localRow, File: index, Line: -1, Review: -1, ResolveStart: -1, ResolveEnd: -1})
+		}
+		for _, hit := range diffFileHitRegions(detail.Diffs[index], index, contentWidth, boxStart+2, 2) {
+			hits = append(hits, hit)
+		}
+		row += lipgloss.Height(box)
+	}
+	return strings.Join(sections, "\n"), hits
+}
+
+func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX int) []diffHitRegion {
+	regions := make([]diffHitRegion, 0)
+	row := diffContentHeaderHeight(file)
+	for lineIndex, line := range file.Lines {
+		regions = append(regions, diffHitRegion{Row: baseRow + row, File: fileIndex, Line: lineIndex, Review: -1, ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1})
+		row++
+		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
+			review := file.Reviews[reviewIndex]
+			height := lipgloss.Height(renderDiffReview(review, width))
+			for offset := 0; offset < height; offset++ {
+				region := newReviewHitRegion(baseRow+row+offset, fileIndex, lineIndex, reviewIndex, baseX, offset, review)
+				regions = append(regions, region)
+			}
+			row += height
+		}
+	}
+	for reviewIndex, review := range file.Reviews {
+		if !review.Outdated && (review.OldLine > 0 || review.NewLine > 0) {
+			continue
+		}
+		height := lipgloss.Height(renderDiffReview(review, width))
+		for offset := 0; offset < height; offset++ {
+			region := newReviewHitRegion(baseRow+row+offset, fileIndex, -1, reviewIndex, baseX, offset, review)
+			regions = append(regions, region)
+		}
+		row += height
+	}
+	return regions
+}
+
+func newReviewHitRegion(row, file, line, reviewIndex, baseX, offset int, review provider.DiffReview) diffHitRegion {
+	region := diffHitRegion{
+		Row: row, File: file, Line: line, Review: reviewIndex,
+		ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1,
+	}
+	if offset != 0 {
+		return region
+	}
+	plain := reviewMetaText(review)
+	region.ResolveStart, region.ResolveEnd = reviewActionBounds(plain, "[Resolve]", baseX)
+	region.ReplyStart, region.ReplyEnd = reviewActionBounds(plain, "[Reply]", baseX)
+	return region
+}
+
+func reviewActionBounds(meta, action string, baseX int) (int, int) {
+	index := strings.Index(meta, action)
+	if index < 0 {
+		return -1, -1
+	}
+	start := baseX + 2 + lipgloss.Width(meta[:index])
+	return start, start + lipgloss.Width(action)
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.actionBusy {
 		return m, nil
 	}
+	if m.screen == commentScreen {
+		return m, nil
+	}
+	if m.screen == diffScreen {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			if m.diffDragging {
+				m.diffDragging = false
+				if m.diffAnchor == m.diffLine {
+					m.diffAnchor = -1
+					m.status = "review line selected"
+				} else {
+					m.status = "review range selected"
+					return m.openCommentEditor(inlineReview)
+				}
+			}
+			return m, nil
+		case tea.MouseActionMotion:
+			if !m.diffDragging || msg.Button != tea.MouseButtonLeft {
+				return m, nil
+			}
+			line, ok := m.diffLineAtMouse(msg.Y)
+			if !ok || line == m.diffLine {
+				return m, nil
+			}
+			m.diffLine = line
+			m.status = "dragging review range"
+			m.setDiffContentPreservingOffset()
+			return m, nil
+		case tea.MouseActionPress:
+			if msg.Button != tea.MouseButtonLeft {
+				break
+			}
+			m.diffDragging = false
+			if msg.X >= 0 && msg.X < m.viewport.Width {
+				hit, ok := m.diffHitAtMouse(msg.X, msg.Y)
+				if !ok {
+					break
+				}
+				m.diffFile = hit.File
+				if hit.Line >= 0 {
+					m.diffLine = hit.Line
+				}
+				if hit.Review >= 0 {
+					m.selectedReview = hit.Review
+					m.setDiffContentPreservingOffset()
+					review := m.detail.Diffs[hit.File].Reviews[hit.Review]
+					if resolveButtonHit(hit, msg.X) {
+						return m.startResolveReview(review)
+					}
+					if replyButtonHit(hit, msg.X) {
+						return m.openReplyEditor(review)
+					}
+					return m, nil
+				}
+				if hit.Line >= 0 {
+					m.selectedReview = -1
+					m.diffAnchor = hit.Line
+					m.diffDragging = true
+					m.status = "dragging review range"
+					m.setDiffContentPreservingOffset()
+					return m, nil
+				}
+			}
+		}
+	}
+	if m.screen == detailScreen && diffCommentableKind(m.kind()) {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			if !m.diffDragging {
+				return m, nil
+			}
+			m.diffDragging = false
+			if m.diffAnchor >= 0 && m.diffAnchor != m.diffLine {
+				m.status = "review range selected"
+				return m.openCommentEditor(inlineReview)
+			}
+			m.diffAnchor = -1
+			m.detailDiffActive = false
+			m.screen = diffScreen
+			m.setDiffContent()
+			return m, nil
+		case tea.MouseActionMotion:
+			if !m.diffDragging || msg.Button != tea.MouseButtonLeft {
+				return m, nil
+			}
+			hit, ok := m.detailDiffHitAtMouse(msg.X, msg.Y)
+			if !ok || hit.File != m.diffFile || hit.Line < 0 || hit.Line == m.diffLine {
+				return m, nil
+			}
+			m.diffLine = hit.Line
+			m.status = "dragging review range"
+			m.setDetailContentPreservingOffset()
+			return m, nil
+		case tea.MouseActionPress:
+			if msg.Button != tea.MouseButtonLeft {
+				break
+			}
+			hit, ok := m.detailDiffHitAtMouse(msg.X, msg.Y)
+			if !ok {
+				break
+			}
+			m.diffFile = hit.File
+			if hit.Line >= 0 {
+				m.diffLine = hit.Line
+			}
+			if hit.Review >= 0 {
+				m.selectedReview = hit.Review
+				m.detailDiffActive = true
+				m.setDetailContentPreservingOffset()
+				review := m.detail.Diffs[hit.File].Reviews[hit.Review]
+				if resolveButtonHit(hit, msg.X) {
+					return m.startResolveReview(review)
+				}
+				if replyButtonHit(hit, msg.X) {
+					return m.openReplyEditor(review)
+				}
+				return m, nil
+			}
+			if hit.Line < 0 {
+				m.diffLine = -1
+				m.diffAnchor = -1
+				m.selectedReview = -1
+				m.detailDiffActive = false
+				m.screen = diffScreen
+				m.clampDiffSelection()
+				m.setDiffContent()
+				return m, nil
+			}
+			m.selectedReview = -1
+			m.diffAnchor = hit.Line
+			m.diffDragging = true
+			m.detailDiffActive = true
+			m.status = "dragging review range"
+			m.setDetailContentPreservingOffset()
+			return m, nil
+		}
+	}
 	if msg.Button == tea.MouseButtonWheelUp {
-		if m.screen == detailScreen || m.screen == labelScreen {
+		if m.screen == diffScreen {
+			m.moveDiffLine(-3)
+		} else if m.screen == detailScreen || m.screen == labelScreen {
 			m.viewport.LineUp(3)
 		} else {
 			m.moveCursor(-3)
@@ -628,7 +1438,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
-		if m.screen == detailScreen || m.screen == labelScreen {
+		if m.screen == diffScreen {
+			m.moveDiffLine(3)
+		} else if m.screen == detailScreen || m.screen == labelScreen {
 			m.viewport.LineDown(3)
 		} else {
 			m.moveCursor(3)
