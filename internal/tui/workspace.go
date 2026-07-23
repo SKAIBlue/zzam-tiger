@@ -889,8 +889,9 @@ func renderWorkspaceFileWithImageAt(file worktree.File, image string, width, hei
 	if height > 1 {
 		lines = lines[:min(len(lines), height-1)]
 	}
+	highlighter := newCodeHighlighter(file.Path)
 	for i := range lines {
-		lines[i] = truncate(lines[i], max(1, width))
+		lines[i] = truncate(highlighter.line(lines[i]), max(1, width))
 	}
 	return kittyDeleteImage() + header + strings.Join(lines, "\n")
 }
@@ -1076,26 +1077,28 @@ func renderWorkspaceDiff(diff worktree.Diff, width int) string {
 	newText := sanitizeWorkspaceText(strings.ReplaceAll(string(diff.New), "\r\n", "\n"))
 	oldLines := workspaceDiffLines(oldText)
 	newLines := workspaceDiffLines(newText)
+	highlighter := newCodeHighlighter(diff.Path)
 	if max(len(oldLines), len(newLines)) > 5_000 || len(oldLines)*len(newLines) > 250_000 {
 		return renderUnifiedWorkspaceDiff(diff, width)
 	}
 	rows := []string{sectionTitleStyle.Render(sanitizeWorkspaceLabel(diff.Path) + " · side by side"), metaStyle.Render(padRight("OLD", column) + " │ " + padRight("NEW", column))}
 	for _, pair := range alignDiffLines(oldLines, newLines) {
 		oldLine, newLine := pair.old, pair.new
+		highlightedOld, highlightedNew := highlighter.line(oldLine), highlighter.line(newLine)
 		var left, right string
 		switch {
 		case pair.hasOld && pair.hasNew && oldLine == newLine:
-			left = padRight(truncate("  "+oldLine, column), column)
-			right = padRight(truncate("  "+newLine, column), column)
+			left = padRight(truncate("  "+highlightedOld, column), column)
+			right = padRight(truncate("  "+highlightedNew, column), column)
 		case pair.hasOld && !pair.hasNew:
-			left = removedLineStyle.Render(padRight(truncate("- "+oldLine, column), column))
+			left = padRight(renderDiffBackground(truncate("- "+highlightedOld, column), "#482B31"), column)
 			right = diffGapStyle.Render(strings.Repeat(" ", column))
 		case !pair.hasOld && pair.hasNew:
 			left = diffGapStyle.Render(strings.Repeat(" ", column))
-			right = addedLineStyle.Render(padRight(truncate("+ "+newLine, column), column))
+			right = padRight(renderDiffBackground(truncate("+ "+highlightedNew, column), "#203C2F"), column)
 		default:
-			left = removedLineStyle.Render(padRight(truncate("- "+oldLine, column), column))
-			right = addedLineStyle.Render(padRight(truncate("+ "+newLine, column), column))
+			left = padRight(renderDiffBackground(truncate("- "+highlightedOld, column), "#482B31"), column)
+			right = padRight(renderDiffBackground(truncate("+ "+highlightedNew, column), "#203C2F"), column)
 		}
 		rows = append(rows, left+metaStyle.Render(" │ ")+right)
 	}
@@ -1119,18 +1122,36 @@ func renderUnifiedWorkspaceDiff(diff worktree.Diff, width int) string {
 		patch = "No textual changes."
 	}
 	lines := strings.Split(patch, "\n")
+	highlighter := newCodeHighlighter(diff.Path)
 	for i, line := range lines {
-		line = truncate(line, max(1, width))
+		isAddition := strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++")
+		isRemoval := strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---")
+		marker, content := diffLineParts(line)
+		if isAddition || isRemoval || marker == " " {
+			line = marker + highlighter.line(content)
+		}
 		switch {
-		case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-			lines[i] = addedLineStyle.Render(line)
-		case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-			lines[i] = removedLineStyle.Render(line)
+		case isAddition:
+			lines[i] = renderDiffBackground(line, "#203C2F")
+		case isRemoval:
+			lines[i] = renderDiffBackground(line, "#482B31")
 		default:
 			lines[i] = metaStyle.Render(line)
 		}
 	}
 	return kittyDeleteImage() + sectionTitleStyle.Render(sanitizeWorkspaceLabel(diff.Path)+" · unified") + "\n" + strings.Join(lines, "\n")
+}
+
+func diffLineParts(line string) (string, string) {
+	if line == "" {
+		return "", ""
+	}
+	switch line[0] {
+	case '+', '-', ' ':
+		return line[:1], line[1:]
+	default:
+		return "", line
+	}
 }
 
 func padRight(value string, width int) string {

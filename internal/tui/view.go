@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
@@ -31,10 +32,9 @@ var (
 	sectionTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	detailBoxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
 	composerStyle       = detailBoxStyle.Copy().BorderForeground(accent).Background(lipgloss.Color("#1B1F2A"))
-	addedLineStyle      = lipgloss.NewStyle().Foreground(green)
-	removedLineStyle    = lipgloss.NewStyle().Foreground(red)
+	addedLineStyle      = lipgloss.NewStyle().Background(lipgloss.Color("#203C2F"))
+	removedLineStyle    = lipgloss.NewStyle().Background(lipgloss.Color("#482B31"))
 	diffGapStyle        = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
-	rangeRowStyle       = lipgloss.NewStyle().Background(lipgloss.Color("#263449"))
 	reviewMetaStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
 	reviewBodyStyle     = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
 	selectedReviewStyle = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
@@ -626,6 +626,7 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		fileIndex = 0
 	}
 	file := files[fileIndex]
+	highlighter := newCodeHighlighter(diffPath(file))
 	lines := []string{sectionTitleStyle.Render(diffPath(file))}
 	if file.OldPath != "" && file.NewPath != "" && file.OldPath != file.NewPath {
 		lines = append(lines, metaStyle.Render(file.OldPath+" → "+file.NewPath))
@@ -643,6 +644,9 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		lines = append(lines, metaStyle.Render(padRight("OLD", column)+" │ "+padRight("NEW", column)))
 	}
 	for index, line := range file.Lines {
+		line.Text = sanitizeWorkspaceText(line.Text)
+		inRange := rangeAnchor >= 0 && index >= min(rangeAnchor, selectedLine) && index <= max(rangeAnchor, selectedLine)
+		isSelected := index == selectedLine
 		oldNumber := ""
 		newNumber := ""
 		if line.OldLine > 0 {
@@ -651,18 +655,20 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		if line.NewLine > 0 {
 			newNumber = fmt.Sprintf("%d", line.NewLine)
 		}
-		row := fmt.Sprintf("%4s %4s │ %s", oldNumber, newNumber, line.Text)
+		marker, content := diffLineParts(line.Text)
+		highlighted := content
+		highlighted = highlighter.line(content)
+		row := fmt.Sprintf("%4s %4s │ %s%s", oldNumber, newNumber, marker, highlighted)
 		if split {
-			content := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(line.Text, "+"), "-"), " ")
 			left, right := "", ""
-			switch {
-			case strings.HasPrefix(line.Text, "+"):
-				right = fmt.Sprintf("%4s + %s", newNumber, content)
-			case strings.HasPrefix(line.Text, "-"):
-				left = fmt.Sprintf("%4s - %s", oldNumber, content)
+			switch marker {
+			case "+":
+				right = fmt.Sprintf("%4s + %s", newNumber, highlighted)
+			case "-":
+				left = fmt.Sprintf("%4s - %s", oldNumber, highlighted)
 			default:
-				left = fmt.Sprintf("%4s   %s", oldNumber, content)
-				right = fmt.Sprintf("%4s   %s", newNumber, content)
+				left = fmt.Sprintf("%4s   %s", oldNumber, highlighted)
+				right = fmt.Sprintf("%4s   %s", newNumber, highlighted)
 			}
 			left = padRight(truncate(left, column), column)
 			right = padRight(truncate(right, column), column)
@@ -673,23 +679,21 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 				right = diffGapStyle.Render(right)
 			}
 			row = left + metaStyle.Render(" │ ") + right
-		} else {
-			row = truncate(row, max(1, width))
 		}
-		switch {
-		case strings.HasPrefix(line.Text, "+"):
-			row = addedLineStyle.Render(row)
-		case strings.HasPrefix(line.Text, "-"):
-			row = removedLineStyle.Render(row)
-		default:
+		isAddition := strings.HasPrefix(line.Text, "+")
+		isRemoval := strings.HasPrefix(line.Text, "-")
+		if !isAddition && !isRemoval {
 			row = metaStyle.Render(row)
 		}
-		fullRow := lipgloss.NewStyle().Width(max(1, width)).Render(row)
-		if rangeAnchor >= 0 && index >= min(rangeAnchor, selectedLine) && index <= max(rangeAnchor, selectedLine) {
-			row = rangeRowStyle.Render(fullRow)
-		}
-		if index == selectedLine {
-			row = selectedRow.Render(fullRow)
+		switch {
+		case isSelected:
+			row = renderDiffBackground(row, "#315F85")
+		case inRange:
+			row = renderDiffBackground(row, "#244B6B")
+		case isAddition:
+			row = renderDiffBackground(row, "#203C2F")
+		case isRemoval:
+			row = renderDiffBackground(row, "#482B31")
 		}
 		lines = append(lines, row)
 		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
@@ -877,17 +881,13 @@ func truncate(value string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if lipgloss.Width(value) <= width {
+	if ansi.StringWidth(value) <= width {
 		return value
 	}
 	if width <= 3 {
 		return strings.Repeat(".", width)
 	}
-	runes := []rune(value)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+3 > width {
-		runes = runes[:len(runes)-1]
-	}
-	return string(runes) + "..."
+	return ansi.Truncate(value, width, "...")
 }
 
 func placeOverlay(width, height int, foreground, background string) string {

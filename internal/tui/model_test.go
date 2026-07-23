@@ -643,7 +643,7 @@ func TestDiffScreenNavigatesFilesAndLines(t *testing.T) {
 	}
 	updated, _ = m.Update(key('j'))
 	m = updated.(Model)
-	if m.diffLine != 1 || !strings.Contains(m.viewport.View(), selectedRow.Render(lipgloss.NewStyle().Width(m.viewport.Width).Render(addedLineStyle.Render("        3 │ +added")))) {
+	if m.diffLine != 1 || !strings.Contains(m.viewport.View(), renderDiffBackground("        3 │ +added", "#315F85")) {
 		t.Fatalf("selected added line was not highlighted: line=%d view=%q", m.diffLine, m.viewport.View())
 	}
 	updated, _ = m.Update(key('v'))
@@ -888,13 +888,11 @@ func TestDiffRangeRendersRangeAndStrongerCursorHighlight(t *testing.T) {
 	files := readyDetailModel(fakeProvider{}, provider.PullRequests).detail.Diffs
 	got := renderDiffFile(files, 0, 1, 0, 80)
 	anchorRow := metaStyle.Render("   2    2 │  context")
-	anchorRow = lipgloss.NewStyle().Width(80).Render(anchorRow)
-	if !strings.Contains(got, rangeRowStyle.Render(anchorRow)) {
+	if !strings.Contains(got, renderDiffBackground(anchorRow, "#244B6B")) {
 		t.Fatalf("range anchor was not highlighted: %q", got)
 	}
 	cursorRow := addedLineStyle.Render("        3 │ +added")
-	cursorRow = lipgloss.NewStyle().Width(80).Render(cursorRow)
-	if !strings.Contains(got, selectedRow.Render(cursorRow)) {
+	if !strings.Contains(got, renderDiffBackground(cursorRow, "#315F85")) {
 		t.Fatalf("range cursor lacked stronger selection: %q", got)
 	}
 }
@@ -1078,15 +1076,17 @@ func TestDetailDiffDragOpensMultilineComposerWithHighlightedRange(t *testing.T) 
 		t.Fatalf("detail range did not open composer: screen=%v origin=%v mode=%v anchor=%d line=%d active=%t", m.screen, m.commentOrigin, m.commentMode, m.diffAnchor, m.diffLine, m.detailDiffActive)
 	}
 	view := m.View()
+	for _, renderedLine := range strings.Split(view, "\n") {
+		if width := lipgloss.Width(renderedLine); width > m.width {
+			t.Fatalf("detail range row width = %d, terminal width = %d: %q", width, m.width, renderedLine)
+		}
+	}
 	if !strings.Contains(view, "Inline review · first.go:2-3") || !strings.Contains(view, " context") || !strings.Contains(view, "+added") {
 		t.Fatalf("detail range composer lost selected context: %q", view)
 	}
-	contentWidth := max(12, m.viewport.Width-2) - 4
 	anchorRow := metaStyle.Render("   2    2 │  context")
-	anchorRow = lipgloss.NewStyle().Width(contentWidth).Render(anchorRow)
 	cursorRow := addedLineStyle.Render("        3 │ +added")
-	cursorRow = lipgloss.NewStyle().Width(contentWidth).Render(cursorRow)
-	if !strings.Contains(view, rangeRowStyle.Render(anchorRow)) || !strings.Contains(view, selectedRow.Render(cursorRow)) {
+	if !strings.Contains(view, renderDiffBackground(anchorRow, "#244B6B")) || !strings.Contains(view, renderDiffBackground(cursorRow, "#315F85")) {
 		t.Fatalf("detail range composer did not keep both line highlights: %q", view)
 	}
 }
