@@ -13,7 +13,7 @@ The provider is selected from the current repository's `origin` URL. `github.com
 - `Commit` opens first; `Files` provides a lazily loaded, filterable file tree and read-only preview, with directories read asynchronously only when expanded and Kitty terminals rendering PNG, JPEG, and GIF images inline, plus SVG when `rsvg-convert` or ImageMagick is available, with a safe fallback otherwise
 - `Commit` uses staged/unstaged groups with per-file stage and unstage actions plus a selected-file diff
 - Commit diffs use a side-by-side old/new layout when space allows and fall back to a unified patch in narrow terminals
-- `Graph` draws the commit topology across all local and remote-tracking branches, with branch tips and the checked-out branch attached to their exact commits
+- `Graph` draws the commit topology across all local and remote-tracking branches, with branch tips, tags, and the checked-out branch attached to their exact commits
 - Remote tabs continue with pull/merge requests, issues, milestones, branches, and GitHub Actions or GitLab pipelines
 - CI run details include job logs; selected runs can be cancelled or rerun from the list or detail view
 - Status filters with `←`/`→`: Open, Assigned to me, Closed, Merged, and All where applicable; Assigned to me shows only open items

@@ -89,7 +89,7 @@ func TestWorkspaceThirdTabLoadsCommitGraph(t *testing.T) {
 func TestWorkspaceGraphLoadsLocalAndRemoteRefs(t *testing.T) {
 	workspace := &fakeWorkspace{history: []worktree.Commit{{
 		SHA: "abcdef123456", Subject: "merge feature", Author: "Ada", Parents: []string{"parent-a", "parent-b"},
-		Refs: []worktree.Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}},
+		Refs: []worktree.Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}, {Name: "v0.0.3", Tag: true}},
 	}}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
 	m.active = 2
@@ -98,11 +98,14 @@ func TestWorkspaceGraphLoadsLocalAndRemoteRefs(t *testing.T) {
 		t.Fatalf("graph result = %#v, err=%v", result.items, result.err)
 	}
 	item := result.items[0]
-	if item.ID != "abcdef123456" || item.Meta != "abcdef1" || len(item.Parents) != 2 || len(item.Refs) != 2 {
+	if item.ID != "abcdef123456" || item.Meta != "abcdef1" || len(item.Parents) != 2 || len(item.Refs) != 3 {
 		t.Fatalf("graph item = %#v", item)
 	}
 	if !item.Refs[0].Head || item.Refs[1].Name != "origin/main" || !item.Refs[1].Remote {
 		t.Fatalf("graph refs = %#v", item.Refs)
+	}
+	if item.Refs[2].Name != "v0.0.3" || !item.Refs[2].Tag {
+		t.Fatalf("graph tag ref = %#v", item.Refs[2])
 	}
 }
 
@@ -112,13 +115,13 @@ func TestGraphViewShowsForkMergeAndBranchTips(t *testing.T) {
 	m.width, m.height = 120, 12
 	m.loadingList = false
 	m.items[provider.Commits] = []provider.Item{
-		{ID: "merge", Title: "merge feature", Parents: []string{"main", "feature"}, Refs: []provider.CommitRef{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}}},
+		{ID: "merge", Title: "merge feature", Parents: []string{"main", "feature"}, Refs: []provider.CommitRef{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}, {Name: "v0.0.3", Tag: true}}},
 		{ID: "main", Title: "main work", Parents: []string{"base"}},
 		{ID: "feature", Title: "feature work", Parents: []string{"base"}, Refs: []provider.CommitRef{{Name: "feature"}}},
 		{ID: "base", Title: "common base"},
 	}
 	view := ansi.Strip(m.View())
-	for _, want := range []string{"●─┬", "● │", "│ ●", "[HEAD→main]", "[origin/main]", "[feature]"} {
+	for _, want := range []string{"●─┬", "● │", "│ ●", "[HEAD→main]", "[origin/main]", "[tag:v0.0.3]", "[feature]"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("graph view missing %q:\n%s", want, view)
 		}

@@ -225,6 +225,8 @@ func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
 	git(t, repo, "add", ".")
 	git(t, repo, "commit", "-m", "main work")
 	mainSHA := strings.TrimSpace(string(git(t, repo, "rev-parse", "HEAD")))
+	git(t, repo, "tag", "lightweight", mainSHA)
+	git(t, repo, "tag", "-a", "annotated", "-m", "annotated release", featureSHA)
 
 	commits, err := New(repo, provider.ExecRunner{}).History(context.Background(), 20)
 	if err != nil {
@@ -242,8 +244,12 @@ func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
 	} else if !slices.Contains(got.Refs, Ref{Name: mainBranch, Head: true}) {
 		t.Fatalf("main refs = %#v", got.Refs)
 	}
+	if got := bySHA[mainSHA]; !slices.Contains(got.Refs, Ref{Name: "lightweight", Tag: true}) {
+		t.Fatalf("main tag refs = %#v", got.Refs)
+	}
 	if got := bySHA[featureSHA]; !slices.Contains(got.Refs, Ref{Name: "feature"}) ||
-		!slices.Contains(got.Refs, Ref{Name: "origin/feature", Remote: true}) {
+		!slices.Contains(got.Refs, Ref{Name: "origin/feature", Remote: true}) ||
+		!slices.Contains(got.Refs, Ref{Name: "annotated", Tag: true}) {
 		t.Fatalf("feature refs = %#v", got.Refs)
 	}
 	if len(bySHA[mainSHA].Parents) != 1 || len(bySHA[featureSHA].Parents) != 1 ||
@@ -255,8 +261,9 @@ func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
 func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	when := "2026-07-23T10:20:30+09:00"
 	logOutput := []byte("child\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00" + when + "\x00")
-	refsOutput := []byte("child\x00refs/heads/main\x00*\x00\nchild\x00refs/remotes/origin/main\x00 \x00\n" +
-		"child\x00refs/remotes/origin/HEAD\x00 \x00refs/remotes/origin/main\n")
+	refsOutput := []byte("child\x00\x00refs/heads/main\x00*\x00\nchild\x00\x00refs/remotes/origin/main\x00 \x00\n" +
+		"child\x00\x00refs/remotes/origin/HEAD\x00 \x00refs/remotes/origin/main\n" +
+		"tag-object\x00child\x00refs/tags/v1.0.0\x00 \x00\n")
 	runner := &historyRunner{outputs: [][]byte{logOutput, refsOutput}}
 	client := &Client{root: "/repo", runner: runner}
 
@@ -268,7 +275,7 @@ func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	want := []Commit{{
 		SHA: "child", Parents: []string{"parent-a", "parent-b"}, Subject: "subject with spaces",
 		Author: "Test Author", AuthoredAt: wantTime,
-		Refs: []Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}},
+		Refs: []Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}, {Name: "v1.0.0", Tag: true}},
 	}}
 	if !slices.EqualFunc(commits, want, func(a, b Commit) bool {
 		return a.SHA == b.SHA && slices.Equal(a.Parents, b.Parents) && a.Subject == b.Subject &&
@@ -277,7 +284,7 @@ func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 		t.Fatalf("History() = %#v, want %#v", commits, want)
 	}
 	wantLog := []string{"git", "-C", "/repo", "log", "--all", "--topo-order", "-z", "-n200", "--format=%H%x00%P%x00%s%x00%an%x00%aI"}
-	wantRefs := []string{"git", "-C", "/repo", "for-each-ref", "--format=%(objectname)%00%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes"}
+	wantRefs := []string{"git", "-C", "/repo", "for-each-ref", "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"}
 	if len(runner.calls) != 2 || !slices.Equal(runner.calls[0], wantLog) || !slices.Equal(runner.calls[1], wantRefs) {
 		t.Fatalf("History commands = %#v", runner.calls)
 	}
@@ -290,8 +297,8 @@ func TestParseHistoryRejectsMalformedRecords(t *testing.T) {
 	if _, err := parseHistory([]byte("sha\x00\x00subject\x00author\x00not-a-time\x00")); err == nil {
 		t.Fatal("invalid authored time unexpectedly parsed")
 	}
-	if _, err := parseHistoryRefs([]byte("sha\x00refs/tags/v1\x00 \x00\n")); err == nil {
-		t.Fatal("non-branch ref unexpectedly parsed")
+	if _, err := parseHistoryRefs([]byte("sha\x00\x00refs/notes/test\x00 \x00\n")); err == nil {
+		t.Fatal("unsupported ref unexpectedly parsed")
 	}
 }
 

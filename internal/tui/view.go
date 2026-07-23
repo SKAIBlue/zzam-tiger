@@ -323,7 +323,10 @@ func (m Model) graphItemRow(item provider.Item, graph string, selected bool) str
 	for _, ref := range item.Refs {
 		label := ref.Name
 		style := sectionTitleStyle
-		if ref.Remote {
+		if ref.Tag {
+			label = "tag:" + label
+			style = reviewMetaStyle
+		} else if ref.Remote {
 			style = metaStyle.Copy().Foreground(accent)
 		}
 		if ref.Head {

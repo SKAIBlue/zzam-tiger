@@ -313,7 +313,7 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 			for _, commit := range commits {
 				refs := make([]provider.CommitRef, 0, len(commit.Refs))
 				for _, ref := range commit.Refs {
-					refs = append(refs, provider.CommitRef{Name: ref.Name, Remote: ref.Remote, Head: ref.Head})
+					refs = append(refs, provider.CommitRef{Name: ref.Name, Remote: ref.Remote, Head: ref.Head, Tag: ref.Tag})
 				}
 				items = append(items, provider.Item{
 					ID: commit.SHA, Title: commit.Subject, State: "commit", Author: commit.Author,

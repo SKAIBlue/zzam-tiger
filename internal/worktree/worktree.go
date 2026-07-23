@@ -66,11 +66,12 @@ type Diff struct {
 	Patch  string
 }
 
-// Ref identifies a local or remote branch pointing at a commit.
+// Ref identifies a branch or tag pointing at a commit.
 type Ref struct {
 	Name   string
 	Remote bool
 	Head   bool
+	Tag    bool
 }
 
 // Commit is one entry in the repository's reachable history.
@@ -231,7 +232,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 const maxHistoryCommits = 200
 
 // History returns commits reachable from all local and remote branches in
-// topological order, with branch references attached to their target commits.
+// topological order, with branch and tag references attached to their target commits.
 func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
 	if limit <= 0 || limit > maxHistoryCommits {
 		limit = maxHistoryCommits
@@ -246,8 +247,8 @@ func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
 		return nil, err
 	}
 
-	refsOut, err := c.git(ctx, "for-each-ref", "--format=%(objectname)%00%(refname)%00%(HEAD)%00%(symref)",
-		"refs/heads", "refs/remotes")
+	refsOut, err := c.git(ctx, "for-each-ref", "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00%(symref)",
+		"refs/heads", "refs/remotes", "refs/tags")
 	if err != nil {
 		return nil, err
 	}
@@ -563,27 +564,33 @@ func parseHistoryRefs(data []byte) (map[string][]Ref, error) {
 			continue
 		}
 		fields := bytes.Split(line, []byte{0})
-		if len(fields) != 4 || len(fields[0]) == 0 {
-			return nil, fmt.Errorf("invalid Git branch ref %q", line)
+		if len(fields) != 5 || len(fields[0]) == 0 {
+			return nil, fmt.Errorf("invalid Git ref %q", line)
 		}
-		if len(fields[3]) > 0 {
+		if len(fields[4]) > 0 {
 			continue
 		}
-		fullName := string(fields[1])
-		ref := Ref{Head: string(fields[2]) == "*"}
+		fullName := string(fields[2])
+		ref := Ref{Head: string(fields[3]) == "*"}
 		switch {
 		case strings.HasPrefix(fullName, "refs/heads/"):
 			ref.Name = strings.TrimPrefix(fullName, "refs/heads/")
 		case strings.HasPrefix(fullName, "refs/remotes/"):
 			ref.Name = strings.TrimPrefix(fullName, "refs/remotes/")
 			ref.Remote = true
+		case strings.HasPrefix(fullName, "refs/tags/"):
+			ref.Name = strings.TrimPrefix(fullName, "refs/tags/")
+			ref.Tag = true
 		default:
-			return nil, fmt.Errorf("unexpected Git branch ref %q", fullName)
+			return nil, fmt.Errorf("unexpected Git ref %q", fullName)
 		}
 		if ref.Name == "" {
-			return nil, fmt.Errorf("invalid Git branch ref %q", fullName)
+			return nil, fmt.Errorf("invalid Git ref %q", fullName)
 		}
 		sha := string(fields[0])
+		if ref.Tag && len(fields[1]) > 0 {
+			sha = string(fields[1])
+		}
 		refs[sha] = append(refs[sha], ref)
 	}
 	return refs, nil
