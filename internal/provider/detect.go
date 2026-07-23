@@ -59,12 +59,10 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 
 	if requested == "auto" || requested == "" {
 		switch {
-		case hostHasLabel(host, "gitlab"):
-			requested = "gitlab"
-		case hostHasLabel(host, "github"):
+		case strings.EqualFold(host, "github.com"):
 			requested = "github"
 		case host != "":
-			return nil, fmt.Errorf("cannot identify provider from origin host %q; pass --provider github or --provider gitlab", host)
+			requested = "gitlab"
 		case remoteErr != nil && repo != "":
 			return nil, fmt.Errorf("no origin remote to identify the provider for %q; pass --provider github or --provider gitlab", repo)
 		case remoteErr != nil:
@@ -88,13 +86,4 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("could not detect provider")
 	}
-}
-
-func hostHasLabel(host, label string) bool {
-	for _, part := range strings.Split(strings.ToLower(host), ".") {
-		if part == label {
-			return true
-		}
-	}
-	return false
 }

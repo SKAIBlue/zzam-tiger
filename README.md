@@ -2,7 +2,7 @@
 
 `gtui` is a mouse-friendly terminal UI for GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
 
-The provider is selected from the current repository's `origin` URL. A GitHub origin requires `gh`; a GitLab origin requires `glab`. If the required CLI is missing, `gtui` exits before entering the alternate screen and prints platform-specific installation and authentication instructions.
+The provider is selected from the current repository's `origin` URL. `github.com` uses GitHub; every other host uses GitLab. A GitHub origin requires `gh`, while a GitLab origin requires `glab`. If the required CLI is missing, `gtui` exits before entering the alternate screen and prints platform-specific installation and authentication instructions.
 
 ## Features
 
@@ -48,7 +48,7 @@ gtui
 Useful options:
 
 ```text
---provider auto|github|gitlab  Provider override for an unrecognized self-hosted origin
+--provider auto|github|gitlab  Override the provider inferred from origin
 --repo owner/name             Repository override; provider still comes from origin unless set explicitly
 --refresh 5s                  Refresh interval; 0 disables automatic refresh
 --version                     Print version

@@ -92,19 +92,29 @@ func TestDetectGitLabFromOrigin(t *testing.T) {
 	}
 }
 
-func TestDetectRejectsSubstringHostFalsePositive(t *testing.T) {
+func TestDetectTreatsNonGitHubHostAsGitLab(t *testing.T) {
 	runner := &fakeRunner{
-		paths: map[string]bool{"gh": true},
+		paths: map[string]bool{"glab": true},
 		run: func(name string, args ...string) ([]byte, error) {
 			if name == "git" {
 				return []byte("https://notgithub.com/owner/repo.git\n"), nil
 			}
-			return nil, nil
+			return []byte("{}"), nil
 		},
 	}
-	_, err := Detect("auto", "", runner)
-	if err == nil || !strings.Contains(err.Error(), "cannot identify provider") {
-		t.Fatalf("expected ambiguous host error, got %v", err)
+	backend, err := Detect("auto", "", runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.Name() != "GitLab" || backend.Repository() != "owner/repo" {
+		t.Fatalf("unexpected backend: %s %s", backend.Name(), backend.Repository())
+	}
+	joined := make([]string, 0, len(runner.calls))
+	for _, call := range runner.calls {
+		joined = append(joined, strings.Join(call, " "))
+	}
+	if calls := strings.Join(joined, "\n"); !strings.Contains(calls, "glab auth status --hostname notgithub.com") {
+		t.Fatalf("non-GitHub hostname was not passed to GitLab:\n%s", calls)
 	}
 }
 
