@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "**"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+  build-linux:
+    name: Build Linux (${{ matrix.name }})
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            goarch: amd64
+          - name: arm64
+            goarch: arm64
+          - name: x86
+            goarch: "386"
+          - name: x86_64
+            goarch: amd64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare release metadata
+        id: metadata
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          safe_version="${VERSION//\//-}"
+          echo "archive=zt_${safe_version}_linux_${{ matrix.name }}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package
+        shell: bash
+        env:
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+        run: |
+          mkdir -p package
+          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o package/zt ./cmd/zt
+          tar -C package -czf "$ARCHIVE" zt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.name }}
+          path: ${{ steps.metadata.outputs.archive }}
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          safe_version="${VERSION//\//-}"
+          mkdir -p build universal apple-silicon
+
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o build/zt-amd64 ./cmd/zt
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -trimpath \
+            -ldflags="-s -w -X main.version=${VERSION}" \
+            -o build/zt-arm64 ./cmd/zt
+
+          lipo -create -output universal/zt build/zt-amd64 build/zt-arm64
+          cp build/zt-arm64 apple-silicon/zt
+          tar -C universal -czf "zt_${safe_version}_macos_universal.tar.gz" zt
+          tar -C apple-silicon -czf "zt_${safe_version}_macos_apple_silicon.tar.gz" zt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: zt_*_macos_*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - build-linux
+      - build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > checksums.txt
+
+      - name: Create release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag
