@@ -66,6 +66,23 @@ type Diff struct {
 	Patch  string
 }
 
+// Ref identifies a local or remote branch pointing at a commit.
+type Ref struct {
+	Name   string
+	Remote bool
+	Head   bool
+}
+
+// Commit is one entry in the repository's reachable history.
+type Commit struct {
+	SHA        string
+	Parents    []string
+	Subject    string
+	Author     string
+	AuthoredAt time.Time
+	Refs       []Ref
+}
+
 // New creates a client rooted at root. The root may be relative.
 func New(root string, runner provider.Runner) *Client {
 	if abs, err := filepath.Abs(root); err == nil {
@@ -211,6 +228,39 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return parseStatus(out)
 }
 
+const maxHistoryCommits = 200
+
+// History returns commits reachable from all local and remote branches in
+// topological order, with branch references attached to their target commits.
+func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
+	if limit <= 0 || limit > maxHistoryCommits {
+		limit = maxHistoryCommits
+	}
+	out, err := c.git(ctx, "log", "--all", "--topo-order", "-z", fmt.Sprintf("-n%d", limit),
+		"--format=%H%x00%P%x00%s%x00%an%x00%aI")
+	if err != nil {
+		return nil, err
+	}
+	commits, err := parseHistory(out)
+	if err != nil {
+		return nil, err
+	}
+
+	refsOut, err := c.git(ctx, "for-each-ref", "--format=%(objectname)%00%(refname)%00%(HEAD)%00%(symref)",
+		"refs/heads", "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+	refs, err := parseHistoryRefs(refsOut)
+	if err != nil {
+		return nil, err
+	}
+	for i := range commits {
+		commits[i].Refs = refs[commits[i].SHA]
+	}
+	return commits, nil
+}
+
 // Stage adds a path to the index.
 func (c *Client) Stage(ctx context.Context, path string) error {
 	clean, err := cleanPath(path)
@@ -218,6 +268,12 @@ func (c *Client) Stage(ctx context.Context, path string) error {
 		return err
 	}
 	_, err = c.git(ctx, "add", "--", clean)
+	return err
+}
+
+// StageAll adds every working-tree change to the index.
+func (c *Client) StageAll(ctx context.Context) error {
+	_, err := c.git(ctx, "add", "-A", "--", ".")
 	return err
 }
 
@@ -244,6 +300,16 @@ func (c *Client) Unstage(ctx context.Context, path string) error {
 	}
 	args := append([]string{"reset", "-q", "HEAD", "--"}, paths...)
 	_, err = c.git(ctx, args...)
+	return err
+}
+
+// UnstageAll removes every staged change from the index.
+func (c *Client) UnstageAll(ctx context.Context) error {
+	if _, err := c.git(ctx, "rev-parse", "--verify", "HEAD"); err != nil {
+		_, err = c.git(ctx, "rm", "--cached", "-r", "-q", "-f", "--", ".")
+		return err
+	}
+	_, err := c.git(ctx, "reset", "-q", "HEAD", "--", ".")
 	return err
 }
 
@@ -454,6 +520,73 @@ func parseStatus(data []byte) (Status, error) {
 		}
 	}
 	return status, nil
+}
+
+func parseHistory(data []byte) ([]Commit, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	fields := bytes.Split(data, []byte{0})
+	if len(fields) > 0 && len(fields[len(fields)-1]) == 0 {
+		fields = fields[:len(fields)-1]
+	}
+	const fieldsPerCommit = 5
+	if len(fields)%fieldsPerCommit != 0 {
+		return nil, fmt.Errorf("invalid Git history: got %d fields", len(fields))
+	}
+	commits := make([]Commit, 0, len(fields)/fieldsPerCommit)
+	for i := 0; i < len(fields); i += fieldsPerCommit {
+		sha := string(fields[i])
+		if sha == "" {
+			return nil, fmt.Errorf("invalid Git history: empty commit SHA")
+		}
+		authoredAt, err := time.Parse(time.RFC3339, string(fields[i+4]))
+		if err != nil {
+			return nil, fmt.Errorf("parse authored time for %s: %w", sha, err)
+		}
+		var parents []string
+		if len(fields[i+1]) > 0 {
+			parents = strings.Fields(string(fields[i+1]))
+		}
+		commits = append(commits, Commit{
+			SHA: sha, Parents: parents, Subject: string(fields[i+2]),
+			Author: string(fields[i+3]), AuthoredAt: authoredAt,
+		})
+	}
+	return commits, nil
+}
+
+func parseHistoryRefs(data []byte) (map[string][]Ref, error) {
+	refs := make(map[string][]Ref)
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		fields := bytes.Split(line, []byte{0})
+		if len(fields) != 4 || len(fields[0]) == 0 {
+			return nil, fmt.Errorf("invalid Git branch ref %q", line)
+		}
+		if len(fields[3]) > 0 {
+			continue
+		}
+		fullName := string(fields[1])
+		ref := Ref{Head: string(fields[2]) == "*"}
+		switch {
+		case strings.HasPrefix(fullName, "refs/heads/"):
+			ref.Name = strings.TrimPrefix(fullName, "refs/heads/")
+		case strings.HasPrefix(fullName, "refs/remotes/"):
+			ref.Name = strings.TrimPrefix(fullName, "refs/remotes/")
+			ref.Remote = true
+		default:
+			return nil, fmt.Errorf("unexpected Git branch ref %q", fullName)
+		}
+		if ref.Name == "" {
+			return nil, fmt.Errorf("invalid Git branch ref %q", fullName)
+		}
+		sha := string(fields[0])
+		refs[sha] = append(refs[sha], ref)
+	}
+	return refs, nil
 }
 
 func detectMIME(path string, data []byte) string {

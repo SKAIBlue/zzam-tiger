@@ -6,10 +6,11 @@ The provider is selected from the current repository's `origin` URL. `github.com
 
 ## Features
 
-- `Files` opens first with a lazily loaded, filterable file tree and read-only preview; directories are read asynchronously only when expanded, and Kitty terminals render PNG, JPEG, and GIF images inline, plus SVG when `rsvg-convert` or ImageMagick is available, with a safe fallback otherwise
+- `Commit` opens first; `Files` provides a lazily loaded, filterable file tree and read-only preview, with directories read asynchronously only when expanded and Kitty terminals rendering PNG, JPEG, and GIF images inline, plus SVG when `rsvg-convert` or ImageMagick is available, with a safe fallback otherwise
 - `Commit` uses staged/unstaged groups with per-file stage and unstage actions plus a selected-file diff
 - Commit diffs use a side-by-side old/new layout when space allows and fall back to a unified patch in narrow terminals
-- Remote tabs continue with pull/merge requests, issues, milestones, branches, `Graph` commit history, and GitHub Actions or GitLab pipelines
+- `Graph` draws the commit topology across all local and remote-tracking branches, with branch tips and the checked-out branch attached to their exact commits
+- Remote tabs continue with pull/merge requests, issues, milestones, branches, and GitHub Actions or GitLab pipelines
 - CI run details include job logs; selected runs can be cancelled or rerun from the list or detail view
 - Status filters with `←`/`→`: Open, Assigned to me, Closed, Merged, and All where applicable; Assigned to me shows only open items
 - Keyboard and mouse navigation, clickable tabs/filters/rows, wheel scrolling, and drag-selected diff review ranges
@@ -78,7 +79,8 @@ Useful options:
 | Files | `Enter` / `→` / `←`, or directory click | Expand or collapse a directory and load its immediate children on demand |
 | Commit | `↑`/`↓` or `j`/`k`, mouse wheel or click | Select a staged or unstaged file and update its diff |
 | Commit | `Space` | Toggle the selected file between staged and unstaged |
-| Commit | `S` / `U` | Stage / unstage the selected file |
+| Commit | `s` / `u` | Stage / unstage the selected file |
+| Commit | `S` / `U` | Stage / unstage all files |
 | Commit | `C`, type, then `Enter` | Focus the commit message and commit staged changes |
 | Commit | Click `Commit` | Commit staged changes with the entered message |
 | Files / Commit | `PgUp` / `PgDn`, wheel over preview | Scroll the file preview or diff without changing the selected file |

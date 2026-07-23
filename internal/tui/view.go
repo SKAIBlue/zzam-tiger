@@ -83,8 +83,14 @@ func (m Model) listView() string {
 	} else {
 		start := m.offset[m.kind()]
 		end := min(len(items), start+m.listHeight())
+		graphPrefixes := commitGraphPrefixes(items)
+		showGraph := m.kind() == provider.Commits && hasCommitGraphMetadata(items)
 		for index := start; index < end; index++ {
-			lines = append(lines, m.itemRow(items[index], index == m.cursor[m.kind()]))
+			if showGraph {
+				lines = append(lines, m.graphItemRow(items[index], graphPrefixes[index], index == m.cursor[m.kind()]))
+			} else {
+				lines = append(lines, m.itemRow(items[index], index == m.cursor[m.kind()]))
+			}
 		}
 	}
 	for len(lines) < m.height-2 {
@@ -93,6 +99,15 @@ func (m Model) listView() string {
 	lines = append(lines, m.statusLine())
 	lines = append(lines, metaStyle.Render(truncate(m.listHelp(), m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func hasCommitGraphMetadata(items []provider.Item) bool {
+	for _, item := range items {
+		if len(item.Parents)+len(item.Refs) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) tabsView() string {
@@ -133,7 +148,7 @@ func (m Model) workspaceView() string {
 		filter = "Filter files: " + value
 	}
 	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
-	if m.active == 1 {
+	if m.active == workspaceCommitTab {
 		lines = append(lines, m.workspaceCommitComposer())
 	} else {
 		lines = append(lines, "")
@@ -143,7 +158,7 @@ func (m Model) workspaceView() string {
 	leftWidth, rightWidth := workspacePaneWidths(m.width)
 	left := m.workspaceList(leftWidth, bodyHeight)
 	right := ""
-	if m.active == 0 {
+	if m.active == workspaceFilesTab {
 		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightWidth, bodyHeight, m.workspacePreviewOffset)
 	} else {
 		if len(m.workspaceDiffRows) == 0 {
@@ -163,8 +178,8 @@ func (m Model) workspaceView() string {
 	}
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ select · Enter/→ expand · ← collapse · click toggle · PgUp/PgDn preview · / filter"
-	if m.active == 1 {
-		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle stage · s/u stage · / filter"
+	if m.active == workspaceCommitTab {
+		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle · s/u selected · S/U all · / filter"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
@@ -181,15 +196,15 @@ func (m Model) workspaceCommitComposer() string {
 }
 
 func (m Model) workspaceList(width, height int) string {
-	if m.workspaceLoading && len(m.workspaceEntries) == 0 && m.active == 0 ||
-		m.workspaceLoading && len(m.filteredWorkspaceChanges()) == 0 && m.active == 1 {
+	if m.workspaceLoading && len(m.workspaceEntries) == 0 && m.active == workspaceFilesTab ||
+		m.workspaceLoading && len(m.filteredWorkspaceChanges()) == 0 && m.active == workspaceCommitTab {
 		return metaStyle.Render(" Loading…")
 	}
 	if m.err != nil {
 		return errorStyle.Render(" " + truncate(sanitizeWorkspaceLabel(m.err.Error()), max(1, width-1)))
 	}
 	rows := make([]string, 0, height)
-	if m.active == 0 {
+	if m.active == workspaceFilesTab {
 		entries := m.filteredWorkspaceEntries()
 		start := min(m.workspaceOffset, len(entries))
 		for index := start; index < len(entries) && len(rows) < height; index++ {
@@ -286,6 +301,91 @@ func (m Model) itemRow(item provider.Item, selected bool) string {
 		return selectedRow.Render(row)
 	}
 	return row
+}
+
+func (m Model) graphItemRow(item provider.Item, graph string, selected bool) string {
+	refs := make([]string, 0, len(item.Refs))
+	for _, ref := range item.Refs {
+		label := ref.Name
+		style := sectionTitleStyle
+		if ref.Remote {
+			style = metaStyle.Copy().Foreground(accent)
+		}
+		if ref.Head {
+			label = "HEAD→" + label
+			style = style.Copy().Bold(true).Foreground(green)
+		}
+		refs = append(refs, style.Render("["+label+"]"))
+	}
+	prefix := " " + graph + " "
+	refText := strings.Join(refs, " ")
+	meta := strings.TrimSpace(strings.Join([]string{item.Meta, item.Author, relativeTime(item.UpdatedAt)}, " · "))
+	reserved := lipgloss.Width(prefix) + lipgloss.Width(refText) + lipgloss.Width(meta) + 3
+	title := truncate(item.Title, max(1, m.width-reserved))
+	row := prefix
+	if refText != "" {
+		row += refText + " "
+	}
+	row += title
+	if meta != "" {
+		row += " " + metaStyle.Render(meta)
+	}
+	row = lipgloss.NewStyle().Width(max(1, m.width)).MaxWidth(max(1, m.width)).Render(row)
+	if selected {
+		return selectedRow.Render(row)
+	}
+	return row
+}
+
+func commitGraphPrefixes(items []provider.Item) []string {
+	rows := make([]string, len(items))
+	lanes := make([]string, 0, 8)
+	for row, item := range items {
+		lane := indexOfString(lanes, item.ID)
+		if lane < 0 {
+			lanes = append([]string{item.ID}, lanes...)
+			lane = 0
+		}
+		parts := make([]string, len(lanes))
+		for index := range lanes {
+			parts[index] = "│"
+		}
+		parts[lane] = "●"
+		rows[row] = strings.Join(parts, " ")
+		if len(item.Parents) > 1 {
+			rows[row] += "─┬"
+		}
+
+		next := append([]string(nil), lanes...)
+		next = append(next[:lane], next[lane+1:]...)
+		insert := make([]string, 0, len(item.Parents))
+		for _, parent := range item.Parents {
+			if parent == "" || indexOfString(insert, parent) >= 0 {
+				continue
+			}
+			if existing := indexOfString(next, parent); existing >= 0 {
+				next = append(next[:existing], next[existing+1:]...)
+				if existing < lane {
+					lane--
+				}
+			}
+			insert = append(insert, parent)
+		}
+		next = append(next, make([]string, len(insert))...)
+		copy(next[lane+len(insert):], next[lane:len(next)-len(insert)])
+		copy(next[lane:], insert)
+		lanes = next
+	}
+	return rows
+}
+
+func indexOfString(values []string, target string) int {
+	for index, value := range values {
+		if value == target {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m Model) listHelp() string {

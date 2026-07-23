@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jwmtp2/gtui/internal/provider"
 )
@@ -25,6 +26,20 @@ func (failingIgnoreRunner) RunInput(context.Context, []byte, string, ...string) 
 }
 
 func (failingIgnoreRunner) LookPath(string) error { return nil }
+
+type historyRunner struct {
+	outputs [][]byte
+	calls   [][]string
+}
+
+func (r *historyRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.calls = append(r.calls, append([]string{name}, args...))
+	out := r.outputs[0]
+	r.outputs = r.outputs[1:]
+	return out, nil
+}
+
+func (*historyRunner) LookPath(string) error { return nil }
 
 func TestEntriesAndRead(t *testing.T) {
 	repo := newRepo(t)
@@ -191,6 +206,95 @@ func TestStatusStageUnstageAndDiff(t *testing.T) {
 	}
 }
 
+func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "base.txt", []byte("base\n"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "base")
+	mainBranch := strings.TrimSpace(string(git(t, repo, "branch", "--show-current")))
+
+	git(t, repo, "checkout", "-q", "-b", "feature")
+	writeFile(t, repo, "feature.txt", []byte("feature\n"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "feature work")
+	featureSHA := strings.TrimSpace(string(git(t, repo, "rev-parse", "HEAD")))
+	git(t, repo, "update-ref", "refs/remotes/origin/feature", featureSHA)
+
+	git(t, repo, "checkout", "-q", mainBranch)
+	writeFile(t, repo, "main.txt", []byte("main\n"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "main work")
+	mainSHA := strings.TrimSpace(string(git(t, repo, "rev-parse", "HEAD")))
+
+	commits, err := New(repo, provider.ExecRunner{}).History(context.Background(), 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 3 {
+		t.Fatalf("History() returned %d commits: %#v", len(commits), commits)
+	}
+	bySHA := make(map[string]Commit, len(commits))
+	for _, commit := range commits {
+		bySHA[commit.SHA] = commit
+	}
+	if got := bySHA[mainSHA]; got.Subject != "main work" || got.Author != "Test User" || got.AuthoredAt.IsZero() {
+		t.Fatalf("main commit = %#v", got)
+	} else if !slices.Contains(got.Refs, Ref{Name: mainBranch, Head: true}) {
+		t.Fatalf("main refs = %#v", got.Refs)
+	}
+	if got := bySHA[featureSHA]; !slices.Contains(got.Refs, Ref{Name: "feature"}) ||
+		!slices.Contains(got.Refs, Ref{Name: "origin/feature", Remote: true}) {
+		t.Fatalf("feature refs = %#v", got.Refs)
+	}
+	if len(bySHA[mainSHA].Parents) != 1 || len(bySHA[featureSHA].Parents) != 1 ||
+		bySHA[mainSHA].Parents[0] != bySHA[featureSHA].Parents[0] {
+		t.Fatalf("branch parents: main=%v feature=%v", bySHA[mainSHA].Parents, bySHA[featureSHA].Parents)
+	}
+}
+
+func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
+	when := "2026-07-23T10:20:30+09:00"
+	logOutput := []byte("child\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00" + when + "\x00")
+	refsOutput := []byte("child\x00refs/heads/main\x00*\x00\nchild\x00refs/remotes/origin/main\x00 \x00\n" +
+		"child\x00refs/remotes/origin/HEAD\x00 \x00refs/remotes/origin/main\n")
+	runner := &historyRunner{outputs: [][]byte{logOutput, refsOutput}}
+	client := &Client{root: "/repo", runner: runner}
+
+	commits, err := client.History(context.Background(), 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTime, _ := time.Parse(time.RFC3339, when)
+	want := []Commit{{
+		SHA: "child", Parents: []string{"parent-a", "parent-b"}, Subject: "subject with spaces",
+		Author: "Test Author", AuthoredAt: wantTime,
+		Refs: []Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}},
+	}}
+	if !slices.EqualFunc(commits, want, func(a, b Commit) bool {
+		return a.SHA == b.SHA && slices.Equal(a.Parents, b.Parents) && a.Subject == b.Subject &&
+			a.Author == b.Author && a.AuthoredAt.Equal(b.AuthoredAt) && slices.Equal(a.Refs, b.Refs)
+	}) {
+		t.Fatalf("History() = %#v, want %#v", commits, want)
+	}
+	wantLog := []string{"git", "-C", "/repo", "log", "--all", "--topo-order", "-z", "-n200", "--format=%H%x00%P%x00%s%x00%an%x00%aI"}
+	wantRefs := []string{"git", "-C", "/repo", "for-each-ref", "--format=%(objectname)%00%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes"}
+	if len(runner.calls) != 2 || !slices.Equal(runner.calls[0], wantLog) || !slices.Equal(runner.calls[1], wantRefs) {
+		t.Fatalf("History commands = %#v", runner.calls)
+	}
+}
+
+func TestParseHistoryRejectsMalformedRecords(t *testing.T) {
+	if _, err := parseHistory([]byte("sha\x00parents\x00subject")); err == nil {
+		t.Fatal("partial history record unexpectedly parsed")
+	}
+	if _, err := parseHistory([]byte("sha\x00\x00subject\x00author\x00not-a-time\x00")); err == nil {
+		t.Fatal("invalid authored time unexpectedly parsed")
+	}
+	if _, err := parseHistoryRefs([]byte("sha\x00refs/tags/v1\x00 \x00\n")); err == nil {
+		t.Fatal("non-branch ref unexpectedly parsed")
+	}
+}
+
 func TestRejectsPathsOutsideWorktree(t *testing.T) {
 	repo := newRepo(t)
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -235,6 +339,42 @@ func TestUnstageBeforeFirstCommit(t *testing.T) {
 	if len(status.Staged) != 0 {
 		t.Fatalf("staged after Unstage = %#v", status.Staged)
 	}
+}
+
+func TestStageAllAndUnstageAll(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "tracked.txt", []byte("before\n"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	writeFile(t, repo, "tracked.txt", []byte("after\n"))
+	writeFile(t, repo, "new.txt", []byte("new\n"))
+
+	client := New(repo, provider.ExecRunner{})
+	if err := client.StageAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChange(t, status.Staged, "new.txt", "", 'A')
+	assertChange(t, status.Staged, "tracked.txt", "", 'M')
+	if len(status.Unstaged) != 0 || len(status.Untracked) != 0 {
+		t.Fatalf("status after StageAll = %#v", status)
+	}
+
+	if err := client.UnstageAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err = client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged) != 0 {
+		t.Fatalf("staged after UnstageAll = %#v", status.Staged)
+	}
+	assertChange(t, status.Unstaged, "tracked.txt", "", 'M')
+	assertChange(t, status.Untracked, "new.txt", "", '?')
 }
 
 func TestUnstageRenameClearsBothIndexPaths(t *testing.T) {

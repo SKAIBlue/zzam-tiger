@@ -20,6 +20,11 @@ import (
 type screen int
 
 const (
+	workspaceCommitTab = iota
+	workspaceFilesTab
+)
+
+const (
 	listScreen screen = iota
 	detailScreen
 	labelScreen
@@ -42,6 +47,15 @@ var kinds = []provider.Kind{
 	provider.Milestones,
 	provider.Branches,
 	provider.Commits,
+	provider.CIRuns,
+}
+
+var workspaceKinds = []provider.Kind{
+	provider.Commits,
+	provider.Branches,
+	provider.PullRequests,
+	provider.Issues,
+	provider.Milestones,
 	provider.CIRuns,
 }
 
@@ -201,7 +215,7 @@ func (m Model) Init() tea.Cmd {
 	var initial tea.Cmd
 	if m.localTab() {
 		request := m.workspaceRequest
-		if m.active == 0 {
+		if m.active == workspaceFilesTab {
 			request = m.workspaceEntryRequest
 		}
 		initial = m.fetchWorkspaceCmd(request)
@@ -217,13 +231,15 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) kind() provider.Kind {
 	index := m.active
+	activeKinds := kinds
 	if m.workspace != nil {
 		index -= 2
+		activeKinds = workspaceKinds
 	}
-	if index < 0 || index >= len(kinds) {
+	if index < 0 || index >= len(activeKinds) {
 		return provider.PullRequests
 	}
-	return kinds[index]
+	return activeKinds[index]
 }
 
 func (m Model) localTab() bool { return m.workspace != nil && m.active < 2 }
@@ -249,12 +265,35 @@ func tickCmd(interval time.Duration) tea.Cmd {
 }
 
 func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.Filter) tea.Cmd {
+	workspace := m.workspace
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		if workspace != nil && kind == provider.Commits {
+			commits, err := workspace.History(ctx, 200)
+			items := make([]provider.Item, 0, len(commits))
+			for _, commit := range commits {
+				refs := make([]provider.CommitRef, 0, len(commit.Refs))
+				for _, ref := range commit.Refs {
+					refs = append(refs, provider.CommitRef{Name: ref.Name, Remote: ref.Remote, Head: ref.Head})
+				}
+				items = append(items, provider.Item{
+					ID: commit.SHA, Title: commit.Subject, State: "commit", Author: commit.Author,
+					UpdatedAt: commit.AuthoredAt, Meta: shortCommitSHA(commit.SHA), Parents: commit.Parents, Refs: refs,
+				})
+			}
+			return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
+		}
 		items, err := m.backend.List(ctx, kind, filter)
 		return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
 	}
+}
+
+func shortCommitSHA(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 func (m Model) fetchDetailCmd(request uint64, kind provider.Kind, item provider.Item) tea.Cmd {
@@ -304,7 +343,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.detail.Item.ID != "" {
 			m.setDetailContent()
 		}
-		if m.localTab() && !m.workspacePreviewLoading && m.active == 0 && m.workspaceFile.Image {
+		if m.localTab() && !m.workspacePreviewLoading && m.active == workspaceFilesTab && m.workspaceFile.Image {
 			width, height := m.workspaceImageDimensions()
 			if width != m.workspaceImageWidth || height != m.workspaceImageHeight {
 				m.workspacePreviewRequest++
@@ -312,7 +351,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, m.workspaceFile, width, height)
 			}
 		}
-		if m.localTab() && !m.workspacePreviewLoading && m.active == 1 && m.workspaceDiff.Path != "" {
+		if m.localTab() && !m.workspacePreviewLoading && m.active == workspaceCommitTab && m.workspaceDiff.Path != "" {
 			_, width := workspacePaneWidths(m.width)
 			if width != m.workspaceDiffWidth {
 				m.workspacePreviewRequest++
@@ -1415,7 +1454,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.localTab() {
 		leftWidth, _ := workspacePaneWidths(m.width)
-		if m.active == 1 && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
+		if m.active == workspaceCommitTab && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
 			buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
 			buttonStart := max(0, m.width-buttonWidth-1)
 			if msg.X >= buttonStart {
@@ -1444,17 +1483,17 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		row := msg.Y - 5
 		index := m.workspaceOffset + row
-		if m.active == 1 {
+		if m.active == workspaceCommitTab {
 			index = m.workspaceChangeIndexAtRow(row)
 		}
 		length := len(m.filteredWorkspaceEntries())
-		if m.active == 1 {
+		if m.active == workspaceCommitTab {
 			length = len(m.filteredWorkspaceChanges())
 		}
 		if index >= 0 && index < length {
 			m.workspaceCursor = index
 			m.ensureWorkspaceCursorVisible()
-			if m.active == 0 && m.filteredWorkspaceEntries()[index].IsDir {
+			if m.active == workspaceFilesTab && m.filteredWorkspaceEntries()[index].IsDir {
 				return m.toggleWorkspaceDirectory()
 			}
 			return m.loadSelectedWorkspaceItem()
@@ -1700,10 +1739,12 @@ func absInt(value int) int {
 
 func (m Model) tabLabels() []string {
 	labels := make([]string, 0, m.tabCount())
+	activeKinds := kinds
 	if m.workspace != nil {
-		labels = append(labels, "Files", "Commit")
+		labels = append(labels, "Commit", "Files")
+		activeKinds = workspaceKinds
 	}
-	for _, kind := range kinds {
+	for _, kind := range activeKinds {
 		name := m.backend.TabName(kind)
 		if kind == provider.Commits {
 			name = "Graph"

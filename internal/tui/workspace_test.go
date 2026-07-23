@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/jwmtp2/gtui/internal/provider"
 	"github.com/jwmtp2/gtui/internal/worktree"
 )
 
@@ -26,7 +27,10 @@ type fakeWorkspace struct {
 	diffs        map[string]worktree.Diff
 	staged       []string
 	unstaged     []string
+	stageAll     int
+	unstageAll   int
 	commits      []string
+	history      []worktree.Commit
 }
 
 func (w *fakeWorkspace) Root() string { return "/repo" }
@@ -45,10 +49,12 @@ func (w *fakeWorkspace) Stage(_ context.Context, path string) error {
 	w.staged = append(w.staged, path)
 	return nil
 }
+func (w *fakeWorkspace) StageAll(context.Context) error { w.stageAll++; return nil }
 func (w *fakeWorkspace) Unstage(_ context.Context, path string) error {
 	w.unstaged = append(w.unstaged, path)
 	return nil
 }
+func (w *fakeWorkspace) UnstageAll(context.Context) error { w.unstageAll++; return nil }
 func (w *fakeWorkspace) Commit(_ context.Context, message string) error {
 	w.commits = append(w.commits, message)
 	return nil
@@ -56,16 +62,82 @@ func (w *fakeWorkspace) Commit(_ context.Context, message string) error {
 func (w *fakeWorkspace) Diff(_ context.Context, path string, _ bool) (worktree.Diff, error) {
 	return w.diffs[path], nil
 }
+func (w *fakeWorkspace) History(context.Context, int) ([]worktree.Commit, error) {
+	return w.history, nil
+}
 
 func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
-	want := []string{"Files", "Commit", "PRs", "Issues", "Milestones", "Branches", "Graph", "CI Runs"}
+	want := []string{"Commit", "Files", "Graph", "Branches", "PRs", "Issues", "Milestones", "CI Runs"}
 	got := m.tabLabels()
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("tabs = %#v, want %#v", got, want)
 	}
-	if m.active != 0 || !m.localTab() {
-		t.Fatalf("initial tab = %d, local=%v; want Files", m.active, m.localTab())
+	if m.active != workspaceCommitTab || !m.localTab() {
+		t.Fatalf("initial tab = %d, local=%v; want Commit", m.active, m.localTab())
+	}
+}
+
+func TestWorkspaceThirdTabLoadsCommitGraph(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = 2
+	if got := m.kind(); got != provider.Commits {
+		t.Fatalf("third tab kind = %v, want Commits", got)
+	}
+}
+
+func TestWorkspaceGraphLoadsLocalAndRemoteRefs(t *testing.T) {
+	workspace := &fakeWorkspace{history: []worktree.Commit{{
+		SHA: "abcdef123456", Subject: "merge feature", Author: "Ada", Parents: []string{"parent-a", "parent-b"},
+		Refs: []worktree.Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}},
+	}}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = 2
+	result := m.fetchListCmd(m.listRequest, provider.Commits, m.filter())().(listResultMsg)
+	if result.err != nil || len(result.items) != 1 {
+		t.Fatalf("graph result = %#v, err=%v", result.items, result.err)
+	}
+	item := result.items[0]
+	if item.ID != "abcdef123456" || item.Meta != "abcdef1" || len(item.Parents) != 2 || len(item.Refs) != 2 {
+		t.Fatalf("graph item = %#v", item)
+	}
+	if !item.Refs[0].Head || item.Refs[1].Name != "origin/main" || !item.Refs[1].Remote {
+		t.Fatalf("graph refs = %#v", item.Refs)
+	}
+}
+
+func TestGraphViewShowsForkMergeAndBranchTips(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active = 4 // Graph in the remote-only tab order.
+	m.width, m.height = 120, 12
+	m.loadingList = false
+	m.items[provider.Commits] = []provider.Item{
+		{ID: "merge", Title: "merge feature", Parents: []string{"main", "feature"}, Refs: []provider.CommitRef{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}}},
+		{ID: "main", Title: "main work", Parents: []string{"base"}},
+		{ID: "feature", Title: "feature work", Parents: []string{"base"}, Refs: []provider.CommitRef{{Name: "feature"}}},
+		{ID: "base", Title: "common base"},
+	}
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"●─┬", "● │", "│ ●", "[HEAD→main]", "[origin/main]", "[feature]"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("graph view missing %q:\n%s", want, view)
+		}
+	}
+}
+
+func TestGraphViewStaysWithinNarrowTerminal(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active = 4
+	m.width, m.height = 24, 10
+	m.loadingList = false
+	m.items[provider.Commits] = []provider.Item{{
+		ID: "tip", Title: "a deliberately long commit subject", Parents: []string{"base"},
+		Refs: []provider.CommitRef{{Name: "feature/long-name", Head: true}, {Name: "origin/feature/long-name", Remote: true}},
+	}, {ID: "base", Title: "base"}}
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Fatalf("narrow graph row width = %d, want <= %d: %q", width, m.width, ansi.Strip(line))
+		}
 	}
 }
 
@@ -113,6 +185,7 @@ func TestWorkspaceFilesLoadDirectoriesLazily(t *testing.T) {
 		},
 	}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
 
 	updated, preview := m.Update(m.fetchWorkspaceCmd(m.workspaceEntryRequest)())
 	m = updated.(Model)
@@ -163,6 +236,7 @@ func TestWorkspaceStalePreviewDoesNotReplaceDirectorySelection(t *testing.T) {
 		files: map[string]worktree.File{"a.txt": {Path: "a.txt", Data: []byte("old preview")}},
 	}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
 	updated, preview := m.Update(m.fetchWorkspaceCmd(m.workspaceEntryRequest)())
 	m = updated.(Model)
 	if preview == nil {
@@ -190,6 +264,7 @@ func TestWorkspaceDirectoryResultPreservesSelectionByPath(t *testing.T) {
 		files: map[string]worktree.File{"z.txt": {Path: "z.txt", Data: []byte("selected")}},
 	}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
 	updated, _ := m.Update(m.fetchWorkspaceCmd(m.workspaceEntryRequest)())
 	m = updated.(Model)
 
@@ -213,6 +288,7 @@ func TestWorkspaceRefreshReadsOnlyRootAndExpandedDirectories(t *testing.T) {
 		"docs": {{Path: "docs/guide.md", Name: "guide.md"}},
 	}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
 	m.workspaceLoading = false
 	m.workspaceExpanded["docs"] = true
 	m.workspaceLoaded["docs"] = true
@@ -240,6 +316,7 @@ func TestWorkspaceRefreshReadsOnlyRootAndExpandedDirectories(t *testing.T) {
 
 func TestWorkspaceRefreshRejectsLateChildrenOfRemovedDirectory(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
 	m.workspaceEntries = []worktree.Entry{
 		{Path: "docs", Name: "docs", IsDir: true},
 		{Path: "docs/old.md", Name: "old.md"},
@@ -283,7 +360,7 @@ func TestWorkspaceResizeDoesNotCancelPendingPreview(t *testing.T) {
 
 func TestWorkspaceCommitOrderMatchesRenderedGroups(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
-	m.active = 1
+	m.active = workspaceCommitTab
 	m.height = 20
 	m.workspaceStatus = worktree.Status{
 		Staged:    []worktree.Change{{Path: "z.go", Code: 'M'}, {Path: "a.go", Code: 'A'}},
@@ -314,7 +391,7 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 		"a.go": {Path: "a.go"}, "b.go": {Path: "b.go"},
 	}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
-	m.active, m.width, m.height = 1, 120, 20
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
 	m.workspaceStatus = worktree.Status{
 		Staged:   []worktree.Change{{Path: "a.go", Code: 'M'}},
 		Unstaged: []worktree.Change{{Path: "b.go", Code: 'M'}},
@@ -336,7 +413,7 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
 	workspace := &fakeWorkspace{}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
-	m.active, m.width, m.height = 1, 120, 20
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
 	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
 	m.commitMessage.SetValue("Describe the change")
 	m.commitMessage.Focus()
@@ -358,7 +435,7 @@ func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
 
 func TestWorkspaceCommitViewShowsMessageAndButton(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
-	m.active, m.width, m.height = 1, 120, 20
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
 	m.workspaceLoading = false
 	view := ansi.Strip(m.View())
 	if !strings.Contains(view, "Commit message") || !strings.Contains(view, "Commit") {
@@ -369,7 +446,7 @@ func TestWorkspaceCommitViewShowsMessageAndButton(t *testing.T) {
 func TestWorkspaceCommitButtonSubmitsMessage(t *testing.T) {
 	workspace := &fakeWorkspace{}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
-	m.active, m.width, m.height = 1, 120, 20
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
 	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
 	m.commitMessage.SetValue("Commit from button")
 	buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
@@ -387,7 +464,7 @@ func TestWorkspaceCommitButtonSubmitsMessage(t *testing.T) {
 
 func TestWorkspaceCommitRequiresMessageAndStagedChanges(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
-	m.active = 1
+	m.active = workspaceCommitTab
 	m.commitMessage.Focus()
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -494,6 +571,7 @@ func TestWorkspaceDiffFallsBackForLargeOneSidedChange(t *testing.T) {
 
 func TestWorkspacePreviewCanScrollWithoutChangingSelection(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
 	m.width, m.height = 120, 12
 	m.workspaceEntries = []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}
 	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n")}
@@ -651,7 +729,7 @@ func TestWorkspaceStageAndUnstageShortcuts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			workspace.staged, workspace.unstaged = nil, nil
 			m := newWithWorkspace(fakeProvider{}, 0, workspace)
-			m.active = 1
+			m.active = workspaceCommitTab
 			if test.change.staged {
 				m.workspaceStatus.Staged = []worktree.Change{test.change.change}
 			} else {
@@ -677,10 +755,43 @@ func TestWorkspaceStageAndUnstageShortcuts(t *testing.T) {
 	}
 }
 
+func TestWorkspaceStageAndUnstageAllShortcuts(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	for _, test := range []struct {
+		name string
+		key  rune
+	}{
+		{name: "stage all", key: 'S'},
+		{name: "unstage all", key: 'U'},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace.stageAll, workspace.unstageAll = 0, 0
+			m := newWithWorkspace(fakeProvider{}, 0, workspace)
+			m.active = workspaceCommitTab
+			m.workspaceLoading = false
+			updated, cmd := m.Update(key(test.key))
+			m = updated.(Model)
+			if cmd == nil || !m.actionBusy {
+				t.Fatal("shortcut did not start an action")
+			}
+			result := cmd().(workspaceActionResultMsg)
+			if test.key == 'S' && (workspace.stageAll != 1 || workspace.unstageAll != 0) {
+				t.Fatalf("bulk calls = stage %d, unstage %d", workspace.stageAll, workspace.unstageAll)
+			}
+			if test.key == 'U' && (workspace.stageAll != 0 || workspace.unstageAll != 1) {
+				t.Fatalf("bulk calls = stage %d, unstage %d", workspace.stageAll, workspace.unstageAll)
+			}
+			if result.err != nil {
+				t.Fatalf("action result = %#v", result)
+			}
+		})
+	}
+}
+
 func TestWorkspaceStageKeepsSamePathSelectedAfterRegrouping(t *testing.T) {
 	workspace := &fakeWorkspace{status: worktree.Status{Unstaged: []worktree.Change{{Path: "z.go", Code: 'M'}}}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
-	m.active = 1
+	m.active = workspaceCommitTab
 	m.workspaceStatus = workspace.status
 	m.workspaceLoading = false
 

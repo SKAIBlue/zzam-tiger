@@ -51,6 +51,13 @@ type Assignee struct {
 	Login string
 }
 
+// CommitRef identifies a local or remote branch pointing at a commit.
+type CommitRef struct {
+	Name   string
+	Remote bool
+	Head   bool
+}
+
 type Item struct {
 	ID           string
 	Title        string
@@ -62,6 +69,8 @@ type Item struct {
 	UpdatedAt    time.Time
 	Meta         string
 	URL          string
+	Parents      []string
+	Refs         []CommitRef
 }
 
 type Section struct {
