@@ -11,6 +11,8 @@ import (
 	"image/png"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/sys/unix"
 
@@ -104,6 +107,12 @@ func (m Model) fetchWorkspaceFileCmd(request uint64, path string) tea.Cmd {
 		image := ""
 		if err == nil && file.Image {
 			image, _ = kittyImage(file.Data, width, height)
+		} else if err == nil && isMarkdownPath(file.Path) {
+			if target := firstLocalMarkdownImage(file.Path, file.Data); target != "" {
+				if referenced, readErr := m.workspace.Read(ctx, target); readErr == nil && referenced.Image {
+					image, _ = kittyImage(referenced.Data, width, max(1, height/2))
+				}
+			}
 		}
 		return workspaceResultMsg{request: request, op: "file", file: file, image: image, width: width, height: height, err: err}
 	}
@@ -828,6 +837,13 @@ func renderWorkspaceFileWithImageAt(file worktree.File, image string, width, hei
 	if file.Binary || !utf8.Valid(file.Data) {
 		return kittyDeleteImage() + header + metaStyle.Render(fmt.Sprintf("Binary file · %s · %d bytes", file.MIME, len(file.Data)))
 	}
+	if isMarkdownPath(file.Path) {
+		preview := kittyDeleteImage() + header + renderWorkspaceMarkdown(file.Data, width, height, offset)
+		if image != "" {
+			preview += "\n" + image
+		}
+		return preview
+	}
 	content := sanitizeWorkspaceText(strings.ReplaceAll(string(file.Data), "\r\n", "\n"))
 	lines := strings.Split(content, "\n")
 	offset = min(max(0, offset), max(0, len(lines)-1))
@@ -839,6 +855,53 @@ func renderWorkspaceFileWithImageAt(file worktree.File, image string, width, hei
 		lines[i] = truncate(lines[i], max(1, width))
 	}
 	return kittyDeleteImage() + header + strings.Join(lines, "\n")
+}
+
+var markdownImagePattern = regexp.MustCompile(`!\[[^\]]*\]\(([^\s)]+)(?:\s+['"][^'"]*['"])?\)`)
+
+func firstLocalMarkdownImage(markdownPath string, data []byte) string {
+	match := markdownImagePattern.FindSubmatch(data)
+	if len(match) < 2 {
+		return ""
+	}
+	target := strings.TrimSpace(string(match[1]))
+	if target == "" || strings.Contains(target, "://") || strings.HasPrefix(target, "data:") || strings.HasPrefix(target, "/") {
+		return ""
+	}
+	if index := strings.IndexByte(target, '#'); index >= 0 {
+		target = target[:index]
+	}
+	return filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(markdownPath), target)))
+}
+
+func isMarkdownPath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return true
+	default:
+		return false
+	}
+}
+
+func renderWorkspaceMarkdown(data []byte, width, height, offset int) string {
+	content := sanitizeWorkspaceText(strings.ReplaceAll(string(data), "\r\n", "\n"))
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle("dark"),
+		glamour.WithWordWrap(max(10, width)),
+		glamour.WithPreservedNewLines(),
+	)
+	if err == nil {
+		if rendered, renderErr := renderer.Render(content); renderErr == nil {
+			content = strings.TrimSuffix(rendered, "\n")
+		}
+	}
+	lines := strings.Split(content, "\n")
+	offset = min(max(0, offset), max(0, len(lines)-1))
+	lines = lines[offset:]
+	if height > 1 {
+		lines = lines[:min(len(lines), height-1)]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func cropWorkspaceRows(rows []string, height, offset int) string {

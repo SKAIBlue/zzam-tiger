@@ -560,6 +560,22 @@ func TestDiffRenderingExplainsUnavailablePatchContent(t *testing.T) {
 	}
 }
 
+func TestRemoteDiffSwitchesToSplitLayoutWhenWide(t *testing.T) {
+	files := []provider.DiffFile{{NewPath: "main.go", Lines: []provider.DiffLine{
+		{OldLine: 1, NewLine: 1, Text: " same"},
+		{OldLine: 2, Text: "-old"},
+		{NewLine: 2, Text: "+new"},
+	}}}
+	narrow := ansi.Strip(renderDiffFile(files, 0, -1, -1, 99))
+	if strings.Contains(narrow, "OLD") || !strings.Contains(narrow, "-old") {
+		t.Fatalf("narrow diff should stay unified: %q", narrow)
+	}
+	wide := ansi.Strip(renderDiffFile(files, 0, -1, -1, 100))
+	if !strings.Contains(wide, "OLD") || !strings.Contains(wide, "NEW") || !strings.Contains(wide, "2 - old") || !strings.Contains(wide, "2 + new") {
+		t.Fatalf("wide diff should be split: %q", wide)
+	}
+}
+
 func readyDetailModel(backend provider.Provider, kind provider.Kind) Model {
 	m := New(backend, 0)
 	for index, candidate := range kinds {

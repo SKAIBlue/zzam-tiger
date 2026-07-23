@@ -627,6 +627,34 @@ func TestWorkspacePreviewStripsTerminalControlSequences(t *testing.T) {
 	}
 }
 
+func TestWorkspaceMarkdownPreviewUsesRichRenderer(t *testing.T) {
+	t.Setenv("KITTY_WINDOW_ID", "")
+	file := worktree.File{Path: "README.md", MIME: "text/markdown", Data: []byte("# Guide\n\n[Docs](https://example.com)\n\n```go\nfmt.Println(\"hi\")\n```\n\n```mermaid\ngraph TD; A-->B\n```\n\n![Logo](logo.png)\n")}
+	rendered := renderWorkspaceFile(file, 80, 30)
+	plain := ansi.Strip(rendered)
+	for _, want := range []string{"Guide", "Docs", "https://example.com", "fmt.Println", "graph TD", "Logo", "logo.png"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("Markdown preview missing %q: %q", want, plain)
+		}
+	}
+}
+
+func TestMarkdownPreviewLoadsFirstLocalImage(t *testing.T) {
+	workspace := &fakeWorkspace{files: map[string]worktree.File{
+		"docs/guide.md":        {Path: "docs/guide.md", Data: []byte("![Diagram](images/flow.png)\n")},
+		"docs/images/flow.png": {Path: "docs/images/flow.png", Image: true, Binary: true, MIME: "image/png"},
+	}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.width, m.height = 120, 30
+	result := m.fetchWorkspaceFileCmd(1, "docs/guide.md")().(workspaceResultMsg)
+	if result.err != nil || result.file.Path != "docs/guide.md" {
+		t.Fatalf("Markdown preview result = %#v, err=%v", result.file, result.err)
+	}
+	if got := firstLocalMarkdownImage(result.file.Path, result.file.Data); got != "docs/images/flow.png" {
+		t.Fatalf("resolved Markdown image = %q", got)
+	}
+}
+
 func TestKittyImageKeepsNaturalSizeWhenItFitsPreviewPane(t *testing.T) {
 	t.Setenv("KITTY_WINDOW_ID", "1")
 	t.Setenv("TERM", "xterm-kitty")

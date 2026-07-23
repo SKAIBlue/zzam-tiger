@@ -610,6 +610,11 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		lines = append(lines, metaStyle.Render("No patch content is available for this file."))
 		return strings.Join(lines, "\n")
 	}
+	split := width >= 100
+	column := max(12, (width-3)/2)
+	if split {
+		lines = append(lines, metaStyle.Render(padRight("OLD", column)+" │ "+padRight("NEW", column)))
+	}
 	for index, line := range file.Lines {
 		oldNumber := ""
 		newNumber := ""
@@ -620,7 +625,30 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 			newNumber = fmt.Sprintf("%d", line.NewLine)
 		}
 		row := fmt.Sprintf("%4s %4s │ %s", oldNumber, newNumber, line.Text)
-		row = truncate(row, max(1, width))
+		if split {
+			content := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(line.Text, "+"), "-"), " ")
+			left, right := "", ""
+			switch {
+			case strings.HasPrefix(line.Text, "+"):
+				right = fmt.Sprintf("%4s + %s", newNumber, content)
+			case strings.HasPrefix(line.Text, "-"):
+				left = fmt.Sprintf("%4s - %s", oldNumber, content)
+			default:
+				left = fmt.Sprintf("%4s   %s", oldNumber, content)
+				right = fmt.Sprintf("%4s   %s", newNumber, content)
+			}
+			left = padRight(truncate(left, column), column)
+			right = padRight(truncate(right, column), column)
+			if left == strings.Repeat(" ", column) {
+				left = diffGapStyle.Render(left)
+			}
+			if right == strings.Repeat(" ", column) {
+				right = diffGapStyle.Render(right)
+			}
+			row = left + metaStyle.Render(" │ ") + right
+		} else {
+			row = truncate(row, max(1, width))
+		}
 		switch {
 		case strings.HasPrefix(line.Text, "+"):
 			row = addedLineStyle.Render(row)
