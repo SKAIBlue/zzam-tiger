@@ -247,6 +247,16 @@ func (c *Client) Unstage(ctx context.Context, path string) error {
 	return err
 }
 
+// Commit creates a commit from the current index using message.
+func (c *Client) Commit(ctx context.Context, message string) error {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return fmt.Errorf("commit message cannot be empty")
+	}
+	_, err := c.git(ctx, "commit", "-m", message)
+	return err
+}
+
 // Diff returns old/new contents and patch text. staged selects HEAD-to-index;
 // otherwise it selects index-to-working-tree.
 func (c *Client) Diff(ctx context.Context, path string, staged bool) (Diff, error) {

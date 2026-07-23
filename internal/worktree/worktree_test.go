@@ -259,6 +259,32 @@ func TestUnstageRenameClearsBothIndexPaths(t *testing.T) {
 	assertChange(t, status.Untracked, "new.txt", "", '?')
 }
 
+func TestCommitCreatesCommitFromIndex(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "main.go", []byte("package main\n"))
+	client := New(repo, provider.ExecRunner{})
+	if err := client.Stage(context.Background(), "main.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Commit(context.Background(), "initial implementation"); err != nil {
+		t.Fatal(err)
+	}
+	message := strings.TrimSpace(string(git(t, repo, "log", "-1", "--pretty=%B")))
+	if message != "initial implementation" {
+		t.Fatalf("commit message = %q", message)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged) != 0 {
+		t.Fatalf("staged changes after commit = %#v", status.Staged)
+	}
+	if err := client.Commit(context.Background(), "  "); err == nil {
+		t.Fatal("empty commit message unexpectedly succeeded")
+	}
+}
+
 func TestBinaryDetection(t *testing.T) {
 	if isBinary([]byte("plain text\n")) {
 		t.Fatal("plain text detected as binary")

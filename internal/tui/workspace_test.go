@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"image"
 	"os/exec"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ type fakeWorkspace struct {
 	diffs        map[string]worktree.Diff
 	staged       []string
 	unstaged     []string
+	commits      []string
 }
 
 func (w *fakeWorkspace) Root() string { return "/repo" }
@@ -45,6 +47,10 @@ func (w *fakeWorkspace) Stage(_ context.Context, path string) error {
 }
 func (w *fakeWorkspace) Unstage(_ context.Context, path string) error {
 	w.unstaged = append(w.unstaged, path)
+	return nil
+}
+func (w *fakeWorkspace) Commit(_ context.Context, message string) error {
+	w.commits = append(w.commits, message)
 	return nil
 }
 func (w *fakeWorkspace) Diff(_ context.Context, path string, _ bool) (worktree.Diff, error) {
@@ -327,6 +333,76 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = 1, 120, 20
+	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
+	m.commitMessage.SetValue("Describe the change")
+	m.commitMessage.Focus()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil || !m.actionBusy {
+		t.Fatalf("Enter did not start commit: command=%v busy=%t", cmd != nil, m.actionBusy)
+	}
+	updated, refresh := m.Update(cmd())
+	m = updated.(Model)
+	if len(workspace.commits) != 1 || workspace.commits[0] != "Describe the change" {
+		t.Fatalf("commits = %#v", workspace.commits)
+	}
+	if m.commitMessage.Value() != "" || m.commitMessage.Focused() || m.actionBusy || refresh == nil {
+		t.Fatalf("successful commit state: value=%q focused=%t busy=%t refresh=%v", m.commitMessage.Value(), m.commitMessage.Focused(), m.actionBusy, refresh != nil)
+	}
+}
+
+func TestWorkspaceCommitViewShowsMessageAndButton(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = 1, 120, 20
+	m.workspaceLoading = false
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Commit message") || !strings.Contains(view, "Commit") {
+		t.Fatalf("commit composer missing from view: %q", view)
+	}
+}
+
+func TestWorkspaceCommitButtonSubmitsMessage(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = 1, 120, 20
+	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
+	m.commitMessage.SetValue("Commit from button")
+	buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
+
+	updated, cmd := m.Update(tea.MouseMsg{X: m.width - buttonWidth - 1, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil || !m.actionBusy {
+		t.Fatalf("Commit button did not start commit: command=%v busy=%t", cmd != nil, m.actionBusy)
+	}
+	m.Update(cmd())
+	if len(workspace.commits) != 1 || workspace.commits[0] != "Commit from button" {
+		t.Fatalf("commits = %#v", workspace.commits)
+	}
+}
+
+func TestWorkspaceCommitRequiresMessageAndStagedChanges(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = 1
+	m.commitMessage.Focus()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.actionBusy || len(m.workspace.(*fakeWorkspace).commits) != 0 || m.status != "enter a commit message" {
+		t.Fatalf("empty message: busy=%t status=%q", m.actionBusy, m.status)
+	}
+	m.commitMessage.SetValue("Nothing staged")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.actionBusy || len(m.workspace.(*fakeWorkspace).commits) != 0 || m.status != "stage changes before committing" {
+		t.Fatalf("unstaged commit: busy=%t status=%q", m.actionBusy, m.status)
+	}
+}
+
 func TestAlignDiffLinesKeepsInsertionAligned(t *testing.T) {
 	pairs := alignDiffLines([]string{"a", "b", "c"}, []string{"a", "inserted", "b", "c"})
 	want := []alignedDiffLine{
@@ -473,7 +549,7 @@ func TestWorkspacePreviewStripsTerminalControlSequences(t *testing.T) {
 	}
 }
 
-func TestKittyImageIsQuietAndBoundedToPreviewPane(t *testing.T) {
+func TestKittyImageKeepsNaturalSizeWhenItFitsPreviewPane(t *testing.T) {
 	t.Setenv("KITTY_WINDOW_ID", "1")
 	t.Setenv("TERM", "xterm-kitty")
 	t.Setenv("TMUX", "")
@@ -485,10 +561,31 @@ func TestKittyImageIsQuietAndBoundedToPreviewPane(t *testing.T) {
 	if !ok {
 		t.Fatal("Kitty PNG was not rendered")
 	}
-	for _, want := range []string{"a=d,d=i,i=31,q=2", "a=T,f=100,q=2,i=31,C=1,c=40,r=12"} {
+	for _, want := range []string{"a=d,d=i,i=31,q=2", "a=T,f=100,q=2,i=31,C=1,m="} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("Kitty output missing %q: %q", want, rendered)
 		}
+	}
+	if strings.Contains(rendered, ",c=") || strings.Contains(rendered, ",r=") {
+		t.Fatalf("fitting image was resized: %q", rendered)
+	}
+}
+
+func TestKittyImagePlacementContainsOnlyOversizedImages(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		config image.Config
+		want   string
+	}{
+		{name: "natural size", config: image.Config{Width: 100, Height: 100}, want: ""},
+		{name: "width constrained", config: image.Config{Width: 800, Height: 100}, want: ",c=40"},
+		{name: "height constrained", config: image.Config{Width: 100, Height: 800}, want: ",r=12"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := kittyImagePlacement(test.config, 40, 12, 10, 20); got != test.want {
+				t.Fatalf("kittyImagePlacement() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

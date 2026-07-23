@@ -38,6 +38,7 @@ var (
 	reviewMetaStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
 	reviewBodyStyle     = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
 	selectedReviewStyle = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
+	commitButtonStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent).Padding(0, 1)
 )
 
 func (m Model) View() string {
@@ -132,7 +133,11 @@ func (m Model) workspaceView() string {
 		filter = "Filter files: " + value
 	}
 	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
-	lines = append(lines, "")
+	if m.active == 1 {
+		lines = append(lines, m.workspaceCommitComposer())
+	} else {
+		lines = append(lines, "")
+	}
 
 	bodyHeight := m.workspaceListHeight()
 	leftWidth, rightWidth := workspacePaneWidths(m.width)
@@ -159,10 +164,20 @@ func (m Model) workspaceView() string {
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ select · Enter/→ expand · ← collapse · click toggle · PgUp/PgDn preview · / filter"
 	if m.active == 1 {
-		help = " ↑/↓ select · click select · PgUp/PgDn diff · Space toggle stage · s stage · u unstage · / filter"
+		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle stage · s/u stage · / filter"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) workspaceCommitComposer() string {
+	const label = " Commit message: "
+	button := commitButtonStyle.Render("Commit")
+	inputWidth := max(1, m.width-lipgloss.Width(label)-lipgloss.Width(button)-2)
+	input := m.commitMessage
+	input.Width = inputWidth
+	field := lipgloss.NewStyle().Width(inputWidth).Render(input.View())
+	return truncate(label+field+" "+button, m.width)
 }
 
 func (m Model) workspaceList(width, height int) string {

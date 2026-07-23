@@ -82,12 +82,13 @@ type Model struct {
 	cursor      map[provider.Kind]int
 	offset      map[provider.Kind]int
 
-	selected   provider.Item
-	detail     provider.Detail
-	viewport   viewport.Model
-	labels     textinput.Model
-	comment    textarea.Model
-	fileFilter textinput.Model
+	selected      provider.Item
+	detail        provider.Detail
+	viewport      viewport.Model
+	labels        textinput.Model
+	comment       textarea.Model
+	fileFilter    textinput.Model
+	commitMessage textinput.Model
 
 	workspaceEntries        []worktree.Entry
 	workspaceFile           worktree.File
@@ -149,6 +150,9 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	fileFilter.Prompt = "Filter files: "
 	fileFilter.Placeholder = "type a path substring"
 	fileFilter.CharLimit = 300
+	commitMessage := textinput.New()
+	commitMessage.Placeholder = "Commit message"
+	commitMessage.CharLimit = 1000
 
 	model := Model{
 		backend:        backend,
@@ -161,6 +165,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		labels:         labels,
 		comment:        comment,
 		fileFilter:     fileFilter,
+		commitMessage:  commitMessage,
 		diffLine:       -1,
 		diffAnchor:     -1,
 		selectedReview: -1,
@@ -1410,6 +1415,15 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.localTab() {
 		leftWidth, _ := workspacePaneWidths(m.width)
+		if m.active == 1 && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
+			buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
+			buttonStart := max(0, m.width-buttonWidth-1)
+			if msg.X >= buttonStart {
+				return m.startWorkspaceCommit()
+			}
+			m.commitMessage.Focus()
+			return m, nil
+		}
 		if msg.Button == tea.MouseButtonWheelUp {
 			if msg.X >= leftWidth+3 {
 				return m.moveWorkspacePreview(-3), nil

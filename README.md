@@ -79,6 +79,8 @@ Useful options:
 | Commit | `↑`/`↓` or `j`/`k`, mouse wheel or click | Select a staged or unstaged file and update its diff |
 | Commit | `Space` | Toggle the selected file between staged and unstaged |
 | Commit | `S` / `U` | Stage / unstage the selected file |
+| Commit | `C`, type, then `Enter` | Focus the commit message and commit staged changes |
+| Commit | Click `Commit` | Commit staged changes with the entered message |
 | Files / Commit | `PgUp` / `PgDn`, wheel over preview | Scroll the file preview or diff without changing the selected file |
 | List | `←`/`→` or `h`/`l` | Change status filter |
 | List | `↑`/`↓` or `j`/`k`, mouse wheel | Move selection |

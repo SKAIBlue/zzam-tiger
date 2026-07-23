@@ -20,6 +20,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"golang.org/x/sys/unix"
 
 	"github.com/jwmtp2/gtui/internal/worktree"
 )
@@ -31,6 +32,7 @@ type workspaceClient interface {
 	Status(context.Context) (worktree.Status, error)
 	Stage(context.Context, string) error
 	Unstage(context.Context, string) error
+	Commit(context.Context, string) error
 	Diff(context.Context, string, bool) (worktree.Diff, error)
 }
 
@@ -313,9 +315,16 @@ func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Mo
 		m.err = msg.err
 		m.status = msg.action + " failed"
 		m.workspacePendingPath = ""
+		if msg.action == "commit" {
+			return m, m.commitMessage.Focus()
+		}
 		return m, nil
 	}
 	m.status = msg.action + " completed"
+	if msg.action == "commit" {
+		m.commitMessage.SetValue("")
+		m.commitMessage.Blur()
+	}
 	m.workspaceLoading = false
 	return m.startWorkspaceLoad()
 }
@@ -612,6 +621,18 @@ func (m Model) moveWorkspacePreview(delta int) Model {
 }
 
 func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.active == 1 && m.commitMessage.Focused() {
+		switch msg.String() {
+		case "esc":
+			m.commitMessage.Blur()
+			return m, nil
+		case "enter":
+			return m.startWorkspaceCommit()
+		}
+		var cmd tea.Cmd
+		m.commitMessage, cmd = m.commitMessage.Update(msg)
+		return m, cmd
+	}
 	if m.fileFilter.Focused() {
 		if msg.String() == "esc" {
 			m.fileFilter.Blur()
@@ -636,6 +657,10 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "/":
 		return m, m.fileFilter.Focus()
+	case "c", "C":
+		if m.active == 1 {
+			return m, m.commitMessage.Focus()
+		}
 	case "tab", "]":
 		m.active = (m.active + 1) % m.tabCount()
 		return m.startActiveTabLoad()
@@ -691,6 +716,32 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) startWorkspaceCommit() (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	message := strings.TrimSpace(m.commitMessage.Value())
+	if message == "" {
+		m.err = nil
+		m.status = "enter a commit message"
+		return m, m.commitMessage.Focus()
+	}
+	if len(m.workspaceStatus.Staged) == 0 {
+		m.err = nil
+		m.status = "stage changes before committing"
+		return m, m.commitMessage.Focus()
+	}
+	m.actionBusy = true
+	m.err = nil
+	m.status = "committing…"
+	request := m.workspaceRequest
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return workspaceActionResultMsg{request: request, action: "commit", err: m.workspace.Commit(ctx, message)}
+	}
 }
 
 func (m Model) toggleWorkspaceStage(key string) (tea.Model, tea.Cmd) {
@@ -797,6 +848,13 @@ func kittyImage(data []byte, width, height int) (string, bool) {
 	if err := png.Encode(&pngData, decoded); err != nil {
 		return "", false
 	}
+	bounds := decoded.Bounds()
+	config := image.Config{Width: bounds.Dx(), Height: bounds.Dy()}
+	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 50_000_000 {
+		return "", false
+	}
+	cellWidth, cellHeight := terminalCellPixels()
+	placement := kittyImagePlacement(config, width, height, cellWidth, cellHeight)
 	encoded := base64.StdEncoding.EncodeToString(pngData.Bytes())
 	const chunk = 4096
 	parts := []string{kittyDeleteImage()}
@@ -808,12 +866,38 @@ func kittyImage(data []byte, width, height int) (string, bool) {
 		}
 		prefix := fmt.Sprintf("\x1b_Gq=2,m=%d;", more)
 		if len(parts) == 1 {
-			prefix = fmt.Sprintf("\x1b_Ga=T,f=100,q=2,i=31,C=1,c=%d,r=%d,m=%d;", max(1, width), max(1, height), more)
+			prefix = fmt.Sprintf("\x1b_Ga=T,f=100,q=2,i=31,C=1%s,m=%d;", placement, more)
 		}
 		parts = append(parts, prefix+encoded[:n]+"\x1b\\")
 		encoded = encoded[n:]
 	}
 	return strings.Join(parts, ""), true
+}
+
+func kittyImagePlacement(config image.Config, width, height, cellWidth, cellHeight int) string {
+	maxPixelWidth := max(1, width) * max(1, cellWidth)
+	maxPixelHeight := max(1, height) * max(1, cellHeight)
+	if config.Width <= maxPixelWidth && config.Height <= maxPixelHeight {
+		return ""
+	}
+	if int64(maxPixelWidth)*int64(config.Height) <= int64(maxPixelHeight)*int64(config.Width) {
+		return fmt.Sprintf(",c=%d", max(1, width))
+	}
+	return fmt.Sprintf(",r=%d", max(1, height))
+}
+
+func terminalCellPixels() (int, int) {
+	const fallbackWidth, fallbackHeight = 10, 20
+	winsize, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
+	if err != nil || winsize.Col == 0 || winsize.Row == 0 || winsize.Xpixel == 0 || winsize.Ypixel == 0 {
+		return fallbackWidth, fallbackHeight
+	}
+	width := int(winsize.Xpixel) / int(winsize.Col)
+	height := int(winsize.Ypixel) / int(winsize.Row)
+	if width <= 0 || height <= 0 {
+		return fallbackWidth, fallbackHeight
+	}
+	return width, height
 }
 
 func kittyGraphicsAvailable() bool {
