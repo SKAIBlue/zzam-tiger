@@ -37,7 +37,7 @@ release_json=$(curl -fsSL \
   "$GITHUB_API_URL/repos/$ZZAM_TIGER_REPO/releases/latest") || \
   fail "could not fetch the latest release from GitHub"
 
-version=$(printf '%s\n' "$release_json" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
+version=$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
 [ -n "$version" ] || fail "the latest GitHub release did not contain a tag"
 
 safe_version=$(printf '%s' "$version" | tr '/' '-')
