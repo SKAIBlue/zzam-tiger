@@ -75,6 +75,12 @@ zt
 
 Zzam Tiger automatically detects the hosting provider from `origin`. Run `zt --help` to see provider, repository, and refresh overrides.
 
+### Recommended Setup: Split Your Terminal
+
+Zzam Tiger works especially well in a split-terminal layout. Keep your AI coding agent in one pane and run `zt` in another so you can watch changes, review completed work, and identify the next task without interrupting the agent's session.
+
+I use [herdr](https://herdr.dev/), a terminal multiplexer built for working with AI agents. Its panes make it easy to keep your agents and Zzam Tiger visible side by side in the same workspace.
+
 ## License
 
 Zzam Tiger is released under the [0BSD License](LICENSE). You may use, copy, modify, and distribute it freely, including for commercial purposes, with no attribution requirement.
