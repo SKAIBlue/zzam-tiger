@@ -1,4 +1,4 @@
-module github.com/jwmtp2/gtui
+module github.com/SKAIBlue/zzam-tiger
 
 go 1.24.0
 

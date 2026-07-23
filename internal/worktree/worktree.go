@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jwmtp2/gtui/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
 
 // Client reads and mutates one local Git working tree.

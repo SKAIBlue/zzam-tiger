@@ -8,9 +8,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jwmtp2/gtui/internal/provider"
-	"github.com/jwmtp2/gtui/internal/tui"
-	"github.com/jwmtp2/gtui/internal/worktree"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/tui"
+	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
 var version = "dev"
@@ -30,9 +30,9 @@ func main() {
 	backend, err := provider.Detect(*providerName, *repo, provider.ExecRunner{})
 	if err != nil {
 		if missing, ok := provider.IsMissingCLI(err); ok {
-			fmt.Fprintf(os.Stderr, "gtui: %v\n\n%s\n", err, missing.InstallGuide())
+			fmt.Fprintf(os.Stderr, "zt: %v\n\n%s\n", err, missing.InstallGuide())
 		} else {
-			fmt.Fprintf(os.Stderr, "gtui: %v\n", err)
+			fmt.Fprintf(os.Stderr, "zt: %v\n", err)
 		}
 		os.Exit(1)
 	}
@@ -41,7 +41,7 @@ func main() {
 	model := tui.NewWithWorktree(backend, *refresh, workspace)
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := program.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "gtui: %v\n", err)
+		fmt.Fprintf(os.Stderr, "zt: %v\n", err)
 		os.Exit(1)
 	}
 }

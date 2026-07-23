@@ -61,19 +61,20 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 		switch {
 		case strings.EqualFold(host, "github.com"):
 			requested = "github"
-		case host != "":
+		case strings.EqualFold(host, "gitlab.com"):
 			requested = "gitlab"
+		case host != "":
+			requested = detectSelfHostedProvider(ctx, host, runner)
+			if requested == "" {
+				return nil, fmt.Errorf("could not detect whether %q is GitHub Enterprise or self-managed GitLab; pass --provider github or --provider gitlab", host)
+			}
 		case remoteErr != nil && repo != "":
 			return nil, fmt.Errorf("no origin remote to identify the provider for %q; pass --provider github or --provider gitlab", repo)
 		case remoteErr != nil:
-			return nil, fmt.Errorf("this directory has no readable origin remote; run gtui inside a GitHub/GitLab repository")
+			return nil, fmt.Errorf("this directory has no readable origin remote; run zt inside a GitHub/GitLab repository")
 		default:
 			return nil, fmt.Errorf("could not detect provider from origin; pass --provider github or --provider gitlab")
 		}
-	} else if requested == "github" && !strings.EqualFold(host, "github.com") {
-		host = "github.com"
-	} else if requested == "gitlab" && (host == "" || strings.EqualFold(host, "github.com")) {
-		host = "gitlab.com"
 	}
 
 	command := map[string]string{"github": "gh", "gitlab": "glab"}[requested]
@@ -90,4 +91,30 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("could not detect provider")
 	}
+}
+
+func detectSelfHostedProvider(ctx context.Context, host string, runner Runner) string {
+	type candidate struct {
+		provider string
+		command  string
+		args     []string
+	}
+	candidates := []candidate{
+		{provider: "github", command: "gh", args: []string{"auth", "status", "--active", "--hostname", host}},
+		{provider: "gitlab", command: "glab", args: []string{"auth", "status", "--hostname", host}},
+	}
+
+	detected := ""
+	for _, candidate := range candidates {
+		if runner.LookPath(candidate.command) != nil {
+			continue
+		}
+		if _, err := runner.Run(ctx, candidate.command, candidate.args...); err == nil {
+			if detected != "" {
+				return ""
+			}
+			detected = candidate.provider
+		}
+	}
+	return detected
 }

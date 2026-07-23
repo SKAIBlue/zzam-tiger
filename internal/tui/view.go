@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jwmtp2/gtui/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
 
 var (
@@ -43,7 +43,7 @@ var (
 
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Starting gtui…"
+		return "Starting zzam-tiger…"
 	}
 	if m.screen == diffScreen {
 		return m.diffView()
@@ -66,7 +66,7 @@ func (m Model) listView() string {
 		return m.workspaceView()
 	}
 	lines := make([]string, 0, m.height)
-	title := fmt.Sprintf(" gtui  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	title := fmt.Sprintf(" zzam-tiger  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
 	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
@@ -135,7 +135,7 @@ func (m Model) tabsView() string {
 
 func (m Model) workspaceView() string {
 	lines := make([]string, 0, m.height)
-	title := fmt.Sprintf(" gtui  local %s · remote %s/%s", sanitizeWorkspaceLabel(m.workspace.Root()), sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	title := fmt.Sprintf(" zzam-tiger  local %s · remote %s/%s", sanitizeWorkspaceLabel(m.workspace.Root()), sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
 	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))

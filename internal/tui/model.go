@@ -13,8 +13,8 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jwmtp2/gtui/internal/provider"
-	"github.com/jwmtp2/gtui/internal/worktree"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
 type screen int

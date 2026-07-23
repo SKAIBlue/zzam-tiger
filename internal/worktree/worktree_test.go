@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jwmtp2/gtui/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
 
 type failingIgnoreRunner struct{}

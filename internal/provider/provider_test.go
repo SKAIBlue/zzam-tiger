@@ -124,12 +124,12 @@ func TestDetectGitLabFromOrigin(t *testing.T) {
 	}
 }
 
-func TestDetectTreatsNonGitHubHostAsGitLab(t *testing.T) {
+func TestDetectSelfManagedGitLabFromAuthenticatedCLI(t *testing.T) {
 	runner := &fakeRunner{
 		paths: map[string]bool{"glab": true},
 		run: func(name string, args ...string) ([]byte, error) {
 			if name == "git" {
-				return []byte("https://notgithub.com/owner/repo.git\n"), nil
+				return []byte("https://git.example.test/owner/repo.git\n"), nil
 			}
 			return []byte("{}"), nil
 		},
@@ -145,12 +145,12 @@ func TestDetectTreatsNonGitHubHostAsGitLab(t *testing.T) {
 	for _, call := range runner.calls {
 		joined = append(joined, strings.Join(call, " "))
 	}
-	if calls := strings.Join(joined, "\n"); !strings.Contains(calls, "glab auth status --hostname notgithub.com") {
-		t.Fatalf("non-GitHub hostname was not passed to GitLab:\n%s", calls)
+	if calls := strings.Join(joined, "\n"); !strings.Contains(calls, "glab auth status --hostname git.example.test") {
+		t.Fatalf("self-managed GitLab hostname was not passed to glab:\n%s", calls)
 	}
 }
 
-func TestDetectExplicitProviderDoesNotReuseOppositeOriginHost(t *testing.T) {
+func TestDetectExplicitProviderPreservesOriginHost(t *testing.T) {
 	tests := []struct {
 		name       string
 		requested  string
@@ -158,8 +158,8 @@ func TestDetectExplicitProviderDoesNotReuseOppositeOriginHost(t *testing.T) {
 		wantHost   string
 		wantPrefix string
 	}{
-		{name: "GitHub from GitLab origin", requested: "github", origin: "https://gitlab.com/owner/repo.git", wantHost: "github.com", wantPrefix: "gh auth status"},
-		{name: "GitLab from GitHub origin", requested: "gitlab", origin: "https://github.com/owner/repo.git", wantHost: "gitlab.com", wantPrefix: "glab auth status"},
+		{name: "GitHub Enterprise", requested: "github", origin: "https://github.example.test/owner/repo.git", wantHost: "github.example.test", wantPrefix: "gh auth status"},
+		{name: "self-managed GitLab", requested: "gitlab", origin: "https://gitlab.example.test/owner/repo.git", wantHost: "gitlab.example.test", wantPrefix: "glab auth status"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -181,9 +181,53 @@ func TestDetectExplicitProviderDoesNotReuseOppositeOriginHost(t *testing.T) {
 			}
 			joined := strings.Join(calls, "\n")
 			if !strings.Contains(joined, test.wantPrefix) || !strings.Contains(joined, "--hostname "+test.wantHost) {
-				t.Fatalf("explicit provider reused the origin host:\n%s", joined)
+				t.Fatalf("explicit provider did not preserve the origin host:\n%s", joined)
 			}
 		})
+	}
+}
+
+func TestDetectGitHubEnterpriseFromAuthenticatedCLI(t *testing.T) {
+	runner := &fakeRunner{
+		paths: map[string]bool{"gh": true},
+		run: func(name string, args ...string) ([]byte, error) {
+			if name == "git" {
+				return []byte("git@github.example.test:owner/repo.git\n"), nil
+			}
+			return []byte("{}"), nil
+		},
+	}
+	backend, err := Detect("auto", "", runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backend.Name() != "GitHub" || backend.Repository() != "owner/repo" {
+		t.Fatalf("unexpected backend: %s %s", backend.Name(), backend.Repository())
+	}
+	calls := make([]string, 0, len(runner.calls))
+	for _, call := range runner.calls {
+		calls = append(calls, strings.Join(call, " "))
+	}
+	joined := strings.Join(calls, "\n")
+	if !strings.Contains(joined, "gh auth status --active --hostname github.example.test") ||
+		!strings.Contains(joined, "gh repo view github.example.test/owner/repo") {
+		t.Fatalf("GitHub Enterprise hostname not propagated:\n%s", joined)
+	}
+}
+
+func TestDetectUnknownSelfHostedProviderRequestsOverride(t *testing.T) {
+	runner := &fakeRunner{
+		paths: map[string]bool{"gh": true, "glab": true},
+		run: func(name string, _ ...string) ([]byte, error) {
+			if name == "git" {
+				return []byte("https://git.example.test/owner/repo.git\n"), nil
+			}
+			return nil, errors.New("not authenticated")
+		},
+	}
+	_, err := Detect("auto", "", runner)
+	if err == nil || !strings.Contains(err.Error(), "pass --provider github or --provider gitlab") {
+		t.Fatalf("expected actionable provider override error, got %v", err)
 	}
 }
 

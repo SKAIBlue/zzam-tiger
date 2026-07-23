@@ -25,7 +25,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/sys/unix"
 
-	"github.com/jwmtp2/gtui/internal/worktree"
+	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
 type workspaceClient interface {

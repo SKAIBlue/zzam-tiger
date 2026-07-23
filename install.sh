@@ -2,10 +2,10 @@
 set -eu
 
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
-GTUI_REPO="${GTUI_REPO:-jwmtp2/gtui}"
+ZZAM_TIGER_REPO="${ZZAM_TIGER_REPO:-SKAIBlue/zzam-tiger}"
 
 fail() {
-  printf 'gtui installer: %s\n' "$1" >&2
+  printf 'zzam-tiger installer: %s\n' "$1" >&2
   exit 1
 }
 
@@ -23,18 +23,18 @@ INSTALL_DIR=$(CDPATH= cd "$INSTALL_DIR" && pwd)
 
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/go.mod" ]; then
-  printf 'Building gtui from %s…\n' "$SCRIPT_DIR"
+  printf 'Building zzam-tiger from %s…\n' "$SCRIPT_DIR"
   (
     cd "$SCRIPT_DIR"
-    go build -buildvcs=false -trimpath -ldflags "-s -w" -o "$INSTALL_DIR/gtui" ./cmd/gtui
+    go build -buildvcs=false -trimpath -ldflags "-s -w" -o "$INSTALL_DIR/zt" ./cmd/zt
   )
 else
-  printf 'Installing gtui from github.com/%s…\n' "$GTUI_REPO"
-  GOBIN="$INSTALL_DIR" go install "github.com/$GTUI_REPO/cmd/gtui@latest"
+  printf 'Installing zzam-tiger from github.com/%s…\n' "$ZZAM_TIGER_REPO"
+  GOBIN="$INSTALL_DIR" go install "github.com/$ZZAM_TIGER_REPO/cmd/zt@latest"
 fi
 
-chmod +x "$INSTALL_DIR/gtui"
-printf '\nInstalled: %s/gtui\n' "$INSTALL_DIR"
+chmod +x "$INSTALL_DIR/zt"
+printf '\nInstalled: %s/zt\n' "$INSTALL_DIR"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
@@ -42,7 +42,7 @@ case ":$PATH:" in
 esac
 
 if ! command -v gh >/dev/null 2>&1 && ! command -v glab >/dev/null 2>&1; then
-  printf '\nInstall the CLI for your repository provider before running gtui:\n'
+  printf '\nInstall the CLI for your repository provider before running zt:\n'
   printf '  GitHub: https://cli.github.com/  (then: gh auth login)\n'
   printf '  GitLab: https://gitlab.com/gitlab-org/cli  (then: glab auth login)\n'
 fi

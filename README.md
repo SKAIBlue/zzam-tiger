@@ -1,8 +1,8 @@
-# gtui
+# zzam-tiger
 
-`gtui` is a mouse-friendly terminal UI for local Git worktrees plus GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
+`zzam-tiger` is a mouse-friendly terminal UI for local Git worktrees plus GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
 
-The provider is selected from the current repository's `origin` URL. `github.com` uses GitHub; every other host uses GitLab. A GitHub origin requires `gh`, while a GitLab origin requires `glab`. If the required CLI is missing, `gtui` exits before entering the alternate screen and prints platform-specific installation and authentication instructions.
+The provider is selected from the current repository's `origin` URL. `github.com` and `gitlab.com` are recognized directly; self-hosted instances are detected from the CLI authenticated for that host. Use `--provider github` or `--provider gitlab` when a self-hosted server cannot be detected automatically. Only the CLI for the selected provider is required.
 
 ## Features
 
@@ -49,14 +49,14 @@ The default destination is `~/.local/bin`. Override it when needed:
 INSTALL_DIR=/usr/local/bin ./install.sh
 ```
 
-The same script can be piped from a published repository. Set `GTUI_REPO=owner/repo` when using a fork.
+The same script can be piped from a published repository. Set `ZZAM_TIGER_REPO=owner/repo` when using a fork.
 
 ## Run
 
 Run inside a cloned GitHub or GitLab repository:
 
 ```sh
-gtui
+zt
 ```
 
 Useful options:
@@ -112,12 +112,12 @@ Useful options:
 | Comment editor | `Ctrl+S` / `Esc` | Submit / cancel |
 | List/detail | `r` | Refresh now |
 
-`Shift+1` … `Shift+8` are received by terminals as `!`, `@`, `#`, `$`, `%`, `^`, `&`, and `*`; `gtui` handles those sequences directly.
+`Shift+1` … `Shift+8` are received by terminals as `!`, `@`, `#`, `$`, `%`, `^`, `&`, and `*`; `zt` handles those sequences directly.
 
 ## Development
 
 ```sh
 go test ./...
 go vet ./...
-go build ./cmd/gtui
+go build ./cmd/zt
 ```

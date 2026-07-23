@@ -11,7 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/jwmtp2/gtui/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
 
 type fakeProvider struct{}
