@@ -277,7 +277,7 @@ func (g *GitHub) listAssigned(ctx context.Context, kind Kind, current Assignee) 
 	if kind == PullRequests {
 		typeQualifier = "is:pr"
 	}
-	query := "repo:" + g.repo + " " + typeQualifier + " assignee:" + current.Login
+	query := "repo:" + g.repo + " " + typeQualifier + " is:open assignee:" + current.Login
 	data, err := g.api(ctx, "GET", "search/issues", "q="+query, "per_page=100", "sort=updated", "order=desc")
 	if err != nil {
 		return nil, err
@@ -300,7 +300,6 @@ func (g *GitHub) listAssigned(ctx context.Context, kind Kind, current Assignee) 
 		item.AssignedToMe = true
 		items = append(items, item)
 	}
-	openItemsFirst(items)
 	return items, nil
 }
 

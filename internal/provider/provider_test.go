@@ -192,17 +192,13 @@ func TestProvidersExposeAssignedToMeFilters(t *testing.T) {
 	}
 }
 
-func TestGitHubAssignedIssueFilterUsesCurrentLogin(t *testing.T) {
+func TestGitHubAssignedIssueFilterOnlyRequestsOpenItems(t *testing.T) {
 	runner := &fakeRunner{run: func(_ string, args ...string) ([]byte, error) {
 		command := strings.Join(args, " ")
 		if strings.Contains(command, "--method GET user") {
 			return []byte(`{"id":7,"login":"me"}`), nil
 		}
-		return []byte(`{"items":[
-			{"number":2,"title":"closed first from API","state":"closed","user":{"login":"author"},"assignees":[{"id":7,"login":"me"}]},
-			{"number":3,"title":"open","state":"open","user":{"login":"author"},"assignees":[{"id":7,"login":"me"}]},
-			{"number":1,"title":"closed second from API","state":"closed","user":{"login":"author"},"assignees":[{"id":7,"login":"me"}]}
-		]}`), nil
+		return []byte(`{"items":[{"number":3,"title":"open","state":"open","user":{"login":"author"},"assignees":[{"id":7,"login":"me"}]}]}`), nil
 	}}
 	g := &GitHub{runner: runner, repo: "owner/repo"}
 
@@ -210,25 +206,22 @@ func TestGitHubAssignedIssueFilterUsesCurrentLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || !items[0].AssignedToMe || len(items[0].Assignees) != 1 {
+	if len(items) != 1 || !items[0].AssignedToMe || len(items[0].Assignees) != 1 {
 		t.Fatalf("unexpected assigned issue items: %#v", items)
 	}
-	if got := []string{items[0].ID, items[1].ID, items[2].ID}; !reflect.DeepEqual(got, []string{"3", "2", "1"}) {
-		t.Fatalf("assigned issues ordered as %v, want open first and stable closed order", got)
-	}
 	command := strings.Join(runner.calls[1], " ")
-	if !strings.Contains(command, "search/issues") || !strings.Contains(command, "is:issue") || !strings.Contains(command, "assignee:me") {
-		t.Fatalf("assigned issue search omitted type or current login: %s", command)
+	if !strings.Contains(command, "search/issues") || !strings.Contains(command, "is:issue") || !strings.Contains(command, "is:open") || !strings.Contains(command, "assignee:me") {
+		t.Fatalf("assigned issue search omitted type, open state, or current login: %s", command)
 	}
 }
 
-func TestGitHubAssignedPullRequestSearchPreservesMergedState(t *testing.T) {
+func TestGitHubAssignedPullRequestFilterOnlyRequestsOpenItems(t *testing.T) {
 	runner := &fakeRunner{run: func(_ string, args ...string) ([]byte, error) {
 		command := strings.Join(args, " ")
 		if strings.Contains(command, "--method GET user") {
 			return []byte(`{"id":7,"login":"me"}`), nil
 		}
-		return []byte(`{"items":[{"number":4,"title":"merged","state":"closed","user":{"login":"author"},"pull_request":{"merged_at":"2026-01-01T00:00:00Z"}}]}`), nil
+		return []byte(`{"items":[{"number":4,"title":"open","state":"open","user":{"login":"author"}}]}`), nil
 	}}
 	g := &GitHub{runner: runner, repo: "owner/repo"}
 
@@ -236,12 +229,12 @@ func TestGitHubAssignedPullRequestSearchPreservesMergedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].State != "merged" || !items[0].AssignedToMe || len(items[0].Assignees) != 1 {
+	if len(items) != 1 || items[0].State != "open" || !items[0].AssignedToMe || len(items[0].Assignees) != 1 {
 		t.Fatalf("unexpected assigned pull requests: %#v", items)
 	}
 	command := strings.Join(runner.calls[1], " ")
-	if !strings.Contains(command, "search/issues") || !strings.Contains(command, "is:pr") || !strings.Contains(command, "assignee:me") {
-		t.Fatalf("assigned pull request search omitted type or current login: %s", command)
+	if !strings.Contains(command, "search/issues") || !strings.Contains(command, "is:pr") || !strings.Contains(command, "is:open") || !strings.Contains(command, "assignee:me") {
+		t.Fatalf("assigned pull request search omitted type, open state, or current login: %s", command)
 	}
 }
 
@@ -283,11 +276,7 @@ func TestGitLabAssignedFilterAndAssignmentPreserveOtherUsers(t *testing.T) {
 		if strings.Contains(command, "api graphql ") {
 			return []byte(`{"data":{"assignment":{"errors":[]}}}`), nil
 		}
-		return []byte(`[
-			{"iid":3,"title":"closed first from API","state":"closed","author":{"username":"author"},"assignees":[{"id":7,"username":"me"}]},
-			{"iid":4,"title":"mine","state":"opened","author":{"username":"author"},"assignees":[{"id":7,"username":"me"},{"id":9,"username":"other"}]},
-			{"iid":2,"title":"closed second from API","state":"closed","author":{"username":"author"},"assignees":[{"id":7,"username":"me"}]}
-		]`), nil
+		return []byte(`[{"iid":4,"title":"mine","state":"opened","author":{"username":"author"},"assignees":[{"id":7,"username":"me"},{"id":9,"username":"other"}]}]`), nil
 	}}
 	g := &GitLab{runner: runner, repo: "group/project", project: "group%2Fproject"}
 
@@ -295,13 +284,10 @@ func TestGitLabAssignedFilterAndAssignmentPreserveOtherUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || !items[0].AssignedToMe {
+	if len(items) != 1 || !items[0].AssignedToMe {
 		t.Fatalf("unexpected assigned merge requests: %#v", items)
 	}
-	if got := []string{items[0].ID, items[1].ID, items[2].ID}; !reflect.DeepEqual(got, []string{"4", "3", "2"}) {
-		t.Fatalf("assigned merge requests ordered as %v, want opened first and stable closed order", got)
-	}
-	if command := strings.Join(runner.calls[0], " "); !strings.Contains(command, "scope=assigned_to_me") || !strings.Contains(command, "state=all") {
+	if command := strings.Join(runner.calls[0], " "); !strings.Contains(command, "scope=assigned_to_me") || !strings.Contains(command, "state=opened") {
 		t.Fatalf("unexpected GitLab assigned filter: %s", command)
 	}
 	if err := g.SetAssigned(context.Background(), PullRequests, items[0], false); err != nil {

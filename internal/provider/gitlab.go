@@ -153,7 +153,7 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 		if filter.Value != "all" && filter.Value != "assigned" {
 			endpoint += "&state=" + url.QueryEscape(filter.Value)
 		} else if filter.Value == "assigned" {
-			endpoint += "&state=all"
+			endpoint += "&state=opened"
 		}
 		data, err := g.api(ctx, "GET", endpoint)
 		if err != nil {
@@ -183,9 +183,6 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 				current.Meta = fmt.Sprintf("%d open / %d closed", entry.Stats.Total-entry.Stats.Closed, entry.Stats.Closed)
 			}
 			items = append(items, current)
-		}
-		if filter.Value == "assigned" {
-			openItemsFirst(items)
 		}
 		return items, nil
 
