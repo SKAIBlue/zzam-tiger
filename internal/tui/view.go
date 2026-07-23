@@ -23,6 +23,7 @@ var (
 	filterStyle       = lipgloss.NewStyle().Foreground(muted)
 	activeFilter      = lipgloss.NewStyle().Bold(true).Foreground(green).Underline(true)
 	selectedRow       = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#343B58"))
+	myAssignmentTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
 	metaStyle         = lipgloss.NewStyle().Foreground(muted)
 	errorStyle        = lipgloss.NewStyle().Foreground(red)
 	statusStyle       = lipgloss.NewStyle().Foreground(green)
@@ -67,7 +68,7 @@ func (m Model) listView() string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, m.statusLine())
-	lines = append(lines, metaStyle.Render(truncate(" ↑/↓ select · ←/→ filter · Shift+1…5 tabs · Enter detail · mouse supported · r refresh · q quit", m.width)))
+	lines = append(lines, metaStyle.Render(truncate(m.listHelp(), m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
 }
 
@@ -100,21 +101,65 @@ func (m Model) filtersView() string {
 
 func (m Model) itemRow(item provider.Item, selected bool) string {
 	state := stateBadge(item.State)
-	meta := item.Meta
-	if !item.UpdatedAt.IsZero() {
-		meta += " · " + relativeTime(item.UpdatedAt)
+	metaParts := make([]string, 0, 3)
+	if assignableKind(m.kind()) {
+		metaParts = append(metaParts, assigneeLabel(item.Assignees))
 	}
-	available := max(8, m.width-lipgloss.Width(state)-4)
-	row := " " + state + " " + truncate(item.Title, available)
-	metaAvailable := m.width - lipgloss.Width(row) - 2
-	if metaAvailable > 10 {
-		row += " " + metaStyle.Render(truncate(meta, metaAvailable))
+	if item.Meta != "" {
+		metaParts = append(metaParts, item.Meta)
+	}
+	if !item.UpdatedAt.IsZero() {
+		metaParts = append(metaParts, relativeTime(item.UpdatedAt))
+	}
+	meta := strings.Join(metaParts, " · ")
+	prefix := " " + state + " "
+	contentWidth := max(1, m.width-lipgloss.Width(prefix)-1)
+	metaWidth := min(lipgloss.Width(meta), max(0, contentWidth-8-1))
+	titleWidth := max(1, contentWidth-metaWidth)
+	if metaWidth > 0 {
+		titleWidth--
+	}
+	title := truncate(item.Title, titleWidth)
+	if item.AssignedToMe {
+		title = myAssignmentTitle.Render(title)
+	}
+	row := prefix + title
+	if metaWidth > 0 {
+		row += " " + metaStyle.Render(truncate(meta, metaWidth))
 	}
 	row = lipgloss.NewStyle().Width(max(1, m.width)).Render(row)
 	if selected {
 		return selectedRow.Render(row)
 	}
 	return row
+}
+
+func (m Model) listHelp() string {
+	help := " ↑/↓ select · ←/→ filter · Shift+1...5 tabs · Enter detail"
+	if m.kind() == provider.Issues {
+		help += " · C close · O open"
+	}
+	if assignableKind(m.kind()) {
+		help += " · A assign · U unassign"
+	}
+	return help + " · r refresh · q quit"
+}
+
+func assigneeLabel(assignees []provider.Assignee) string {
+	if len(assignees) == 0 {
+		return "unassigned"
+	}
+	logins := make([]string, 0, len(assignees))
+	for _, assignee := range assignees {
+		login := strings.TrimSpace(assignee.Login)
+		if login != "" {
+			logins = append(logins, "@"+login)
+		}
+	}
+	if len(logins) == 0 {
+		return "unassigned"
+	}
+	return "assigned: " + strings.Join(logins, ", ")
 }
 
 func stateBadge(state string) string {
@@ -140,7 +185,12 @@ func (m Model) detailView() string {
 	}
 	title := fmt.Sprintf(" ← Esc  %s  %s", stateBadge(item.State), item.Title)
 	lines := []string{headerStyle.Render(truncate(title, m.width))}
-	meta := fmt.Sprintf(" %s · %s", item.Meta, item.URL)
+	metaParts := []string{item.Meta}
+	if assignableKind(m.kind()) {
+		metaParts = append(metaParts, assigneeLabel(item.Assignees))
+	}
+	metaParts = append(metaParts, item.URL)
+	meta := " " + strings.Join(metaParts, " · ")
 	lines = append(lines, metaStyle.Render(truncate(meta, m.width)))
 	if m.loadingDetail && m.detail.Item.ID == "" {
 		loading := []string{"", metaStyle.Render("  Loading detail…")}
@@ -164,6 +214,9 @@ func (m Model) detailView() string {
 	}
 	if m.kind() == provider.Issues {
 		help += " · C close · O open · L labels"
+	}
+	if assignableKind(m.kind()) {
+		help += " · A assign · U unassign"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	view := strings.Join(lines, "\n")
@@ -223,14 +276,14 @@ func truncate(value string, width int) string {
 	if lipgloss.Width(value) <= width {
 		return value
 	}
-	if width <= 1 {
-		return "…"
+	if width <= 3 {
+		return strings.Repeat(".", width)
 	}
 	runes := []rune(value)
-	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > width {
+	for len(runes) > 0 && lipgloss.Width(string(runes))+3 > width {
 		runes = runes[:len(runes)-1]
 	}
-	return string(runes) + "…"
+	return string(runes) + "..."
 }
 
 func placeOverlay(width, height int, foreground, background string) string {

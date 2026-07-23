@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type GitLab struct {
@@ -14,6 +15,9 @@ type GitLab struct {
 	repo    string
 	project string
 	host    string
+
+	userMu sync.Mutex
+	user   *Assignee
 }
 
 func NewGitLab(runner Runner, repo, host string) (*GitLab, error) {
@@ -56,9 +60,9 @@ func (g *GitLab) TabName(kind Kind) string {
 func (g *GitLab) Filters(kind Kind) []Filter {
 	switch kind {
 	case PullRequests:
-		return []Filter{{"Open", "opened"}, {"Closed", "closed"}, {"Merged", "merged"}, {"All", "all"}}
+		return []Filter{{"Open", "opened"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"Merged", "merged"}, {"All", "all"}}
 	case Issues:
-		return []Filter{{"Open", "opened"}, {"Closed", "closed"}, {"All", "all"}}
+		return []Filter{{"Open", "opened"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"All", "all"}}
 	case Milestones:
 		return []Filter{{"Open", "active"}, {"Closed", "closed"}, {"All", "all"}}
 	default:
@@ -79,29 +83,31 @@ func (g *GitLab) api(ctx context.Context, method, endpoint string, fields ...str
 }
 
 type gitlabUser struct {
+	ID       int    `json:"id"`
 	Username string `json:"username"`
 	Name     string `json:"name"`
 }
 
 type gitlabItem struct {
-	IID            int        `json:"iid"`
-	ID             int        `json:"id"`
-	Title          string     `json:"title"`
-	State          string     `json:"state"`
-	Description    string     `json:"description"`
-	WebURL         string     `json:"web_url"`
-	UpdatedAt      string     `json:"updated_at"`
-	CreatedAt      string     `json:"created_at"`
-	MergedAt       *string    `json:"merged_at"`
-	Author         gitlabUser `json:"author"`
-	Labels         []string   `json:"labels"`
-	SourceBranch   string     `json:"source_branch"`
-	TargetBranch   string     `json:"target_branch"`
-	UserNotesCount int        `json:"user_notes_count"`
-	ChangesCount   string     `json:"changes_count"`
-	DetailedStatus string     `json:"detailed_merge_status"`
-	SHA            string     `json:"sha"`
-	DueDate        string     `json:"due_date"`
+	IID            int          `json:"iid"`
+	ID             int          `json:"id"`
+	Title          string       `json:"title"`
+	State          string       `json:"state"`
+	Description    string       `json:"description"`
+	WebURL         string       `json:"web_url"`
+	UpdatedAt      string       `json:"updated_at"`
+	CreatedAt      string       `json:"created_at"`
+	MergedAt       *string      `json:"merged_at"`
+	Author         gitlabUser   `json:"author"`
+	Assignees      []gitlabUser `json:"assignees"`
+	Labels         []string     `json:"labels"`
+	SourceBranch   string       `json:"source_branch"`
+	TargetBranch   string       `json:"target_branch"`
+	UserNotesCount int          `json:"user_notes_count"`
+	ChangesCount   string       `json:"changes_count"`
+	DetailedStatus string       `json:"detailed_merge_status"`
+	SHA            string       `json:"sha"`
+	DueDate        string       `json:"due_date"`
 	Stats          struct {
 		Total  int `json:"total"`
 		Closed int `json:"closed"`
@@ -117,7 +123,15 @@ func gitlabListItem(raw gitlabItem) Item {
 	if author == "" {
 		author = raw.Author.Name
 	}
-	return Item{ID: strconv.Itoa(raw.IID), Title: raw.Title, State: state, Author: author, HeadSHA: raw.SHA, UpdatedAt: parseTime(raw.UpdatedAt), Meta: fmt.Sprintf("!%d · %s", raw.IID, author), URL: raw.WebURL}
+	item := Item{ID: strconv.Itoa(raw.IID), Title: raw.Title, State: state, Author: author, HeadSHA: raw.SHA, UpdatedAt: parseTime(raw.UpdatedAt), Meta: fmt.Sprintf("!%d · %s", raw.IID, author), URL: raw.WebURL}
+	for _, assignee := range raw.Assignees {
+		login := assignee.Username
+		if login == "" {
+			login = assignee.Name
+		}
+		item.Assignees = append(item.Assignees, Assignee{ID: strconv.Itoa(assignee.ID), Login: login})
+	}
+	return item
 }
 
 func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, error) {
@@ -129,8 +143,17 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 		if kind != Milestones {
 			endpoint += "&order_by=updated_at&sort=desc"
 		}
-		if filter.Value != "all" {
+		if kind != Milestones {
+			scope := "all"
+			if filter.Value == "assigned" {
+				scope = "assigned_to_me"
+			}
+			endpoint += "&scope=" + scope
+		}
+		if filter.Value != "all" && filter.Value != "assigned" {
 			endpoint += "&state=" + url.QueryEscape(filter.Value)
+		} else if filter.Value == "assigned" {
+			endpoint += "&state=all"
 		}
 		data, err := g.api(ctx, "GET", endpoint)
 		if err != nil {
@@ -140,9 +163,19 @@ func (g *GitLab) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return nil, fmt.Errorf("decode GitLab %s: %w", resource, err)
 		}
+		var viewer Assignee
+		if kind == PullRequests || kind == Issues {
+			viewer, err = g.currentUser(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
 		items := make([]Item, 0, len(raw))
 		for _, entry := range raw {
 			current := gitlabListItem(entry)
+			if kind == PullRequests || kind == Issues {
+				current.AssignedToMe = hasAssignee(current.Assignees, viewer)
+			}
 			if kind == Issues {
 				current.Meta = fmt.Sprintf("#%d · %s", entry.IID, current.Author)
 			} else if kind == Milestones {
@@ -256,6 +289,11 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			return Detail{}, fmt.Errorf("decode GitLab detail: %w", err)
 		}
 		detail := Detail{Item: gitlabListItem(raw), Body: raw.Description, Labels: raw.Labels}
+		current, err := g.currentUser(ctx)
+		if err != nil {
+			return Detail{}, err
+		}
+		detail.Item.AssignedToMe = hasAssignee(detail.Item.Assignees, current)
 		if kind == Issues {
 			detail.Item.Meta = fmt.Sprintf("#%d · %s", raw.IID, detail.Item.Author)
 		} else {
@@ -398,6 +436,83 @@ func (g *GitLab) SetIssueState(ctx context.Context, item Item, open bool) error 
 	}
 	_, err := g.api(ctx, "PUT", "projects/"+g.project+"/issues/"+item.ID, "state_event="+event)
 	return err
+}
+
+func (g *GitLab) SetAssigned(ctx context.Context, kind Kind, item Item, assigned bool) error {
+	if err := requireAssignable(kind, item); err != nil {
+		return err
+	}
+	current, err := g.currentUser(ctx)
+	if err != nil {
+		return err
+	}
+	mutation := "issueSetAssignees"
+	if kind == PullRequests {
+		mutation = "mergeRequestSetAssignees"
+	}
+	mode := "APPEND"
+	if !assigned {
+		mode = "REMOVE"
+	}
+	query := fmt.Sprintf(
+		"mutation { assignment: %s(input: { projectPath: %s, iid: %s, assigneeUsernames: [%s], operationMode: %s }) { errors } }",
+		mutation,
+		strconv.Quote(g.repo),
+		strconv.Quote(item.ID),
+		strconv.Quote(current.Login),
+		mode,
+	)
+	data, err := g.api(ctx, "POST", "graphql", "query="+query)
+	if err != nil {
+		return err
+	}
+	var response struct {
+		Data struct {
+			Assignment struct {
+				Errors []string `json:"errors"`
+			} `json:"assignment"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		return fmt.Errorf("decode GitLab assignment response: %w", err)
+	}
+	errors := append([]string(nil), response.Data.Assignment.Errors...)
+	for _, graphQLError := range response.Errors {
+		errors = append(errors, graphQLError.Message)
+	}
+	if len(errors) > 0 {
+		return fmt.Errorf("update GitLab assignment: %s", strings.Join(errors, "; "))
+	}
+	return nil
+}
+
+func (g *GitLab) currentUser(ctx context.Context) (Assignee, error) {
+	g.userMu.Lock()
+	defer g.userMu.Unlock()
+	if g.user != nil {
+		return *g.user, nil
+	}
+	data, err := g.api(ctx, "GET", "user")
+	if err != nil {
+		return Assignee{}, fmt.Errorf("resolve GitLab user: %w", err)
+	}
+	var raw gitlabUser
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Assignee{}, fmt.Errorf("decode GitLab user: %w", err)
+	}
+	login := raw.Username
+	if login == "" {
+		login = raw.Name
+	}
+	if raw.ID == 0 || login == "" {
+		return Assignee{}, fmt.Errorf("resolve GitLab user: response has no id or username")
+	}
+	current := Assignee{ID: strconv.Itoa(raw.ID), Login: login}
+	g.user = &current
+	return current, nil
 }
 
 func (g *GitLab) SetIssueLabels(ctx context.Context, item Item, labels []string) error {

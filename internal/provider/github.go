@@ -7,12 +7,16 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type GitHub struct {
 	runner Runner
 	repo   string
 	host   string
+
+	userMu sync.Mutex
+	user   *Assignee
 }
 
 func NewGitHub(runner Runner, repo, host string) (*GitHub, error) {
@@ -50,8 +54,10 @@ func (g *GitHub) TabName(kind Kind) string { return kind.String() }
 func (g *GitHub) Filters(kind Kind) []Filter {
 	switch kind {
 	case PullRequests:
-		return []Filter{{"Open", "open"}, {"Closed", "closed"}, {"Merged", "merged"}, {"All", "all"}}
-	case Issues, Milestones:
+		return []Filter{{"Open", "open"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"Merged", "merged"}, {"All", "all"}}
+	case Issues:
+		return []Filter{{"Open", "open"}, {"Assigned to me", "assigned"}, {"Closed", "closed"}, {"All", "all"}}
+	case Milestones:
 		return []Filter{{"Open", "open"}, {"Closed", "closed"}, {"All", "all"}}
 	default:
 		return []Filter{{"All", "all"}}
@@ -71,11 +77,16 @@ func (g *GitHub) api(ctx context.Context, method, endpoint string, fields ...str
 }
 
 type githubUser struct {
+	ID    int    `json:"id"`
 	Login string `json:"login"`
 }
 
 type githubLabel struct {
 	Name string `json:"name"`
+}
+
+type githubPullRequestLink struct {
+	MergedAt *string `json:"merged_at"`
 }
 
 type githubItem struct {
@@ -88,6 +99,7 @@ type githubItem struct {
 	CreatedAt   string        `json:"created_at"`
 	MergedAt    *string       `json:"merged_at"`
 	User        githubUser    `json:"user"`
+	Assignees   []githubUser  `json:"assignees"`
 	Labels      []githubLabel `json:"labels"`
 	Comments    int           `json:"comments"`
 	CommitCount int           `json:"commits"`
@@ -101,7 +113,7 @@ type githubItem struct {
 	Base struct {
 		Ref string `json:"ref"`
 	} `json:"base"`
-	PullRequest json.RawMessage `json:"pull_request"`
+	PullRequest *githubPullRequestLink `json:"pull_request"`
 }
 
 func githubListItem(raw githubItem) Item {
@@ -109,7 +121,7 @@ func githubListItem(raw githubItem) Item {
 	if raw.MergedAt != nil {
 		state = "merged"
 	}
-	return Item{
+	item := Item{
 		ID:        strconv.Itoa(raw.Number),
 		Title:     raw.Title,
 		State:     state,
@@ -119,11 +131,26 @@ func githubListItem(raw githubItem) Item {
 		Meta:      fmt.Sprintf("#%d · %s", raw.Number, raw.User.Login),
 		URL:       raw.HTMLURL,
 	}
+	for _, assignee := range raw.Assignees {
+		id := ""
+		if assignee.ID > 0 {
+			id = strconv.Itoa(assignee.ID)
+		}
+		item.Assignees = append(item.Assignees, Assignee{ID: id, Login: assignee.Login})
+	}
+	return item
 }
 
 func (g *GitHub) List(ctx context.Context, kind Kind, filter Filter) ([]Item, error) {
 	switch kind {
 	case PullRequests:
+		current, err := g.currentUser(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Value == "assigned" {
+			return g.listAssigned(ctx, kind, current)
+		}
 		state := filter.Value
 		if state == "merged" {
 			state = "closed"
@@ -142,12 +169,22 @@ func (g *GitHub) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 			if filter.Value == "merged" && !merged || filter.Value == "closed" && merged {
 				continue
 			}
-			items = append(items, githubListItem(entry))
+			item := githubListItem(entry)
+			item.AssignedToMe = hasAssignee(item.Assignees, current)
+			items = append(items, item)
 		}
 		return items, nil
 
 	case Issues:
-		data, err := g.api(ctx, "GET", "repos/"+g.repo+"/issues", "state="+filter.Value, "per_page=100", "sort=updated", "direction=desc")
+		current, err := g.currentUser(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if filter.Value == "assigned" {
+			return g.listAssigned(ctx, kind, current)
+		}
+		fields := []string{"state=" + filter.Value, "per_page=100", "sort=updated", "direction=desc"}
+		data, err := g.api(ctx, "GET", "repos/"+g.repo+"/issues", fields...)
 		if err != nil {
 			return nil, err
 		}
@@ -157,10 +194,12 @@ func (g *GitHub) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 		}
 		items := make([]Item, 0, len(raw))
 		for _, entry := range raw {
-			if len(entry.PullRequest) > 0 && string(entry.PullRequest) != "null" {
+			if entry.PullRequest != nil {
 				continue
 			}
-			items = append(items, githubListItem(entry))
+			item := githubListItem(entry)
+			item.AssignedToMe = hasAssignee(item.Assignees, current)
+			items = append(items, item)
 		}
 		return items, nil
 
@@ -233,6 +272,37 @@ func (g *GitHub) List(ctx context.Context, kind Kind, filter Filter) ([]Item, er
 	}
 }
 
+func (g *GitHub) listAssigned(ctx context.Context, kind Kind, current Assignee) ([]Item, error) {
+	typeQualifier := "is:issue"
+	if kind == PullRequests {
+		typeQualifier = "is:pr"
+	}
+	query := "repo:" + g.repo + " " + typeQualifier + " assignee:" + current.Login
+	data, err := g.api(ctx, "GET", "search/issues", "q="+query, "per_page=100", "sort=updated", "order=desc")
+	if err != nil {
+		return nil, err
+	}
+	var raw struct {
+		Items []githubItem `json:"items"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode assigned GitHub %s: %w", kind, err)
+	}
+	items := make([]Item, 0, len(raw.Items))
+	for _, entry := range raw.Items {
+		if entry.PullRequest != nil && entry.PullRequest.MergedAt != nil {
+			entry.MergedAt = entry.PullRequest.MergedAt
+		}
+		item := githubListItem(entry)
+		if !hasAssignee(item.Assignees, current) {
+			item.Assignees = append(item.Assignees, current)
+		}
+		item.AssignedToMe = true
+		items = append(items, item)
+	}
+	return items, nil
+}
+
 type githubComment struct {
 	Body      string     `json:"body"`
 	User      githubUser `json:"user"`
@@ -287,6 +357,11 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			return Detail{}, fmt.Errorf("decode GitHub detail: %w", err)
 		}
 		detail := Detail{Item: githubListItem(raw), Body: raw.Body}
+		current, err := g.currentUser(ctx)
+		if err != nil {
+			return Detail{}, err
+		}
+		detail.Item.AssignedToMe = hasAssignee(detail.Item.Assignees, current)
 		for _, label := range raw.Labels {
 			detail.Labels = append(detail.Labels, label.Name)
 		}
@@ -498,6 +573,48 @@ func (g *GitHub) SetIssueState(ctx context.Context, item Item, open bool) error 
 	}
 	_, err := g.api(ctx, "PATCH", "repos/"+g.repo+"/issues/"+item.ID, "state="+state)
 	return err
+}
+
+func (g *GitHub) SetAssigned(ctx context.Context, kind Kind, item Item, assigned bool) error {
+	if err := requireAssignable(kind, item); err != nil {
+		return err
+	}
+	current, err := g.currentUser(ctx)
+	if err != nil {
+		return err
+	}
+	method := "POST"
+	if !assigned {
+		method = "DELETE"
+	}
+	_, err = g.api(ctx, method, "repos/"+g.repo+"/issues/"+item.ID+"/assignees", "assignees[]="+current.Login)
+	return err
+}
+
+func (g *GitHub) currentUser(ctx context.Context) (Assignee, error) {
+	g.userMu.Lock()
+	defer g.userMu.Unlock()
+	if g.user != nil {
+		return *g.user, nil
+	}
+	data, err := g.api(ctx, "GET", "user")
+	if err != nil {
+		return Assignee{}, fmt.Errorf("resolve GitHub user: %w", err)
+	}
+	var raw githubUser
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return Assignee{}, fmt.Errorf("decode GitHub user: %w", err)
+	}
+	if raw.Login == "" {
+		return Assignee{}, fmt.Errorf("resolve GitHub user: response has no login")
+	}
+	id := ""
+	if raw.ID > 0 {
+		id = strconv.Itoa(raw.ID)
+	}
+	current := Assignee{ID: id, Login: raw.Login}
+	g.user = &current
+	return current, nil
 }
 
 func (g *GitHub) SetIssueLabels(ctx context.Context, item Item, labels []string) error {

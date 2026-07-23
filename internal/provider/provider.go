@@ -39,15 +39,22 @@ type Filter struct {
 	Value string
 }
 
+type Assignee struct {
+	ID    string
+	Login string
+}
+
 type Item struct {
-	ID        string
-	Title     string
-	State     string
-	Author    string
-	HeadSHA   string
-	UpdatedAt time.Time
-	Meta      string
-	URL       string
+	ID           string
+	Title        string
+	State        string
+	Author       string
+	Assignees    []Assignee
+	AssignedToMe bool
+	HeadSHA      string
+	UpdatedAt    time.Time
+	Meta         string
+	URL          string
 }
 
 type Section struct {
@@ -71,6 +78,7 @@ type Provider interface {
 	Detail(context.Context, Kind, Item) (Detail, error)
 	Merge(context.Context, Item) error
 	SetIssueState(context.Context, Item, bool) error
+	SetAssigned(context.Context, Kind, Item, bool) error
 	SetIssueLabels(context.Context, Item, []string) error
 }
 
@@ -124,4 +132,27 @@ func requireItem(kind Kind, item Item) error {
 		return fmt.Errorf("%s item has no identifier", kind)
 	}
 	return nil
+}
+
+func requireAssignable(kind Kind, item Item) error {
+	if kind != PullRequests && kind != Issues {
+		return fmt.Errorf("%s items cannot be assigned", kind)
+	}
+	return requireItem(kind, item)
+}
+
+func hasAssignee(assignees []Assignee, target Assignee) bool {
+	for _, assignee := range assignees {
+		if sameAssignee(assignee, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameAssignee(left, right Assignee) bool {
+	if left.ID != "" && right.ID != "" {
+		return left.ID == right.ID
+	}
+	return strings.EqualFold(left.Login, right.Login)
 }

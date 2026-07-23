@@ -226,7 +226,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = msg.action + " completed"
 		m.err = nil
+		m.loadingList = false
 		m.loadingDetail = false
+		if m.screen == listScreen {
+			return m.startListLoad()
+		}
 		return m.startDetailLoad()
 
 	case tickMsg:
@@ -237,7 +241,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		var refreshCmd tea.Cmd
 		if m.screen == detailScreen && !m.actionBusy {
 			m, refreshCmd = m.startDetailLoad()
-		} else if m.screen == listScreen {
+		} else if m.screen == listScreen && !m.actionBusy {
 			m, refreshCmd = m.startListLoad()
 		}
 		if refreshCmd != nil {
@@ -270,6 +274,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		if msg.String() == "q" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "q":
 		return m, tea.Quit
@@ -313,6 +323,22 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "enter":
 		return m.openSelected()
+	case "c", "C":
+		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
+			return m.startIssueStateAction(item, false)
+		}
+	case "o", "O":
+		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
+			return m.startIssueStateAction(item, true)
+		}
+	case "a", "A":
+		if item, ok := m.currentListItem(); ok && assignableKind(m.kind()) {
+			return m.startAssignmentAction(item, true)
+		}
+	case "u", "U":
+		if item, ok := m.currentListItem(); ok && assignableKind(m.kind()) {
+			return m.startAssignmentAction(item, false)
+		}
 	case "r":
 		m.loadingList = false
 		return m.startListLoad()
@@ -321,6 +347,12 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		if msg.String() == "q" {
+			return m, tea.Quit
+		}
+		return m, nil
+	}
 	switch msg.String() {
 	case "esc", "backspace":
 		m.screen = listScreen
@@ -353,17 +385,19 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "c", "C":
 		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
-			m.actionBusy = true
-			m.status = "closing issue…"
-			item := m.selected
-			return m, m.actionCmd("close issue", func(ctx context.Context) error { return m.backend.SetIssueState(ctx, item, false) })
+			return m.startIssueStateAction(m.selected, false)
 		}
 	case "o", "O":
 		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
-			m.actionBusy = true
-			m.status = "reopening issue…"
-			item := m.selected
-			return m, m.actionCmd("reopen issue", func(ctx context.Context) error { return m.backend.SetIssueState(ctx, item, true) })
+			return m.startIssueStateAction(m.selected, true)
+		}
+	case "a", "A":
+		if assignableKind(m.kind()) && m.detailReady() {
+			return m.startAssignmentAction(m.selected, true)
+		}
+	case "u", "U":
+		if assignableKind(m.kind()) && m.detailReady() {
+			return m.startAssignmentAction(m.selected, false)
 		}
 	case "l", "L":
 		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
@@ -378,6 +412,52 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) detailReady() bool {
 	return !m.loadingDetail && m.err == nil && m.selected.ID != "" && m.detail.Item.ID == m.selected.ID
+}
+
+func assignableKind(kind provider.Kind) bool {
+	return kind == provider.PullRequests || kind == provider.Issues
+}
+
+func (m Model) currentListItem() (provider.Item, bool) {
+	items := m.items[m.kind()]
+	index := m.cursor[m.kind()]
+	if index < 0 || index >= len(items) {
+		return provider.Item{}, false
+	}
+	return items[index], true
+}
+
+func (m Model) startIssueStateAction(item provider.Item, open bool) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	m.actionBusy = true
+	action := "close issue"
+	m.status = "closing issue…"
+	if open {
+		action = "reopen issue"
+		m.status = "reopening issue…"
+	}
+	return m, m.actionCmd(action, func(ctx context.Context) error {
+		return m.backend.SetIssueState(ctx, item, open)
+	})
+}
+
+func (m Model) startAssignmentAction(item provider.Item, assigned bool) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	m.actionBusy = true
+	action := "assign to me"
+	m.status = "assigning to you…"
+	if !assigned {
+		action = "unassign from me"
+		m.status = "removing your assignment…"
+	}
+	kind := m.kind()
+	return m, m.actionCmd(action, func(ctx context.Context) error {
+		return m.backend.SetAssigned(ctx, kind, item, assigned)
+	})
 }
 
 func (m Model) updateLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -536,6 +616,9 @@ func renderDetail(detail provider.Detail, width int) string {
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
 	if msg.Button == tea.MouseButtonWheelUp {
 		if m.screen == detailScreen || m.screen == labelScreen {
 			m.viewport.LineUp(3)
