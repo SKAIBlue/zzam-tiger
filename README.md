@@ -1,12 +1,15 @@
 # gtui
 
-`gtui` is a mouse-friendly terminal UI for GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
+`gtui` is a mouse-friendly terminal UI for local Git worktrees plus GitHub and GitLab repositories. It uses the authenticated `gh` or `glab` CLI instead of managing separate API tokens.
 
 The provider is selected from the current repository's `origin` URL. `github.com` uses GitHub; every other host uses GitLab. A GitHub origin requires `gh`, while a GitLab origin requires `glab`. If the required CLI is missing, `gtui` exits before entering the alternate screen and prints platform-specific installation and authentication instructions.
 
 ## Features
 
-- Tabs for pull/merge requests, issues, milestones, branches, commit history, and GitHub Actions or GitLab pipelines
+- `Files` opens first with a lazily loaded, filterable file tree and read-only preview; directories are read asynchronously only when expanded, and Kitty terminals render PNG, JPEG, and GIF images inline, plus SVG when `rsvg-convert` or ImageMagick is available, with a safe fallback otherwise
+- `Commit` uses staged/unstaged groups with per-file stage and unstage actions plus a selected-file diff
+- Commit diffs use a side-by-side old/new layout when space allows and fall back to a unified patch in narrow terminals
+- Remote tabs continue with pull/merge requests, issues, milestones, branches, `Graph` commit history, and GitHub Actions or GitLab pipelines
 - CI run details include job logs; selected runs can be cancelled or rerun from the list or detail view
 - Status filters with `←`/`→`: Open, Assigned to me, Closed, Merged, and All where applicable; Assigned to me shows only open items
 - Keyboard and mouse navigation, clickable tabs/filters/rows, wheel scrolling, and drag-selected diff review ranges
@@ -69,7 +72,14 @@ Useful options:
 | Context | Input | Action |
 | --- | --- | --- |
 | Anywhere | `Ctrl+C` | Quit |
-| List | `Shift+1` … `Shift+6`, `Tab`, mouse click | Switch tabs |
+| Anywhere in a list tab | `1` … `8`, `Shift+1` … `Shift+8`, `Tab`, mouse click | Switch tabs |
+| Files / Commit | `/`, then type; `Esc` | Focus the path filter; finish filtering |
+| Files | `↑`/`↓` or `j`/`k`, mouse wheel | Select a file or directory and update the read-only preview |
+| Files | `Enter` / `→` / `←`, or directory click | Expand or collapse a directory and load its immediate children on demand |
+| Commit | `↑`/`↓` or `j`/`k`, mouse wheel or click | Select a staged or unstaged file and update its diff |
+| Commit | `Space` | Toggle the selected file between staged and unstaged |
+| Commit | `S` / `U` | Stage / unstage the selected file |
+| Files / Commit | `PgUp` / `PgDn`, wheel over preview | Scroll the file preview or diff without changing the selected file |
 | List | `←`/`→` or `h`/`l` | Change status filter |
 | List | `↑`/`↓` or `j`/`k`, mouse wheel | Move selection |
 | List | `Enter` or row click | Open details |
@@ -98,7 +108,7 @@ Useful options:
 | Comment editor | `Ctrl+S` / `Esc` | Submit / cancel |
 | List/detail | `r` | Refresh now |
 
-`Shift+1` … `Shift+6` are received by terminals as `!`, `@`, `#`, `$`, `%`, and `^`; `gtui` handles those sequences directly.
+`Shift+1` … `Shift+8` are received by terminals as `!`, `@`, `#`, `$`, `%`, `^`, `&`, and `*`; `gtui` handles those sequences directly.
 
 ## Development
 

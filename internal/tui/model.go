@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jwmtp2/gtui/internal/provider"
+	"github.com/jwmtp2/gtui/internal/worktree"
 )
 
 type screen int
@@ -67,8 +68,9 @@ type actionResultMsg struct {
 type tickMsg time.Time
 
 type Model struct {
-	backend provider.Provider
-	refresh time.Duration
+	backend   provider.Provider
+	workspace workspaceClient
+	refresh   time.Duration
 
 	width  int
 	height int
@@ -80,11 +82,34 @@ type Model struct {
 	cursor      map[provider.Kind]int
 	offset      map[provider.Kind]int
 
-	selected provider.Item
-	detail   provider.Detail
-	viewport viewport.Model
-	labels   textinput.Model
-	comment  textarea.Model
+	selected   provider.Item
+	detail     provider.Detail
+	viewport   viewport.Model
+	labels     textinput.Model
+	comment    textarea.Model
+	fileFilter textinput.Model
+
+	workspaceEntries        []worktree.Entry
+	workspaceFile           worktree.File
+	workspaceImage          string
+	workspaceImageWidth     int
+	workspaceImageHeight    int
+	workspaceStatus         worktree.Status
+	workspaceDiff           worktree.Diff
+	workspaceDiffRows       []string
+	workspaceDiffWidth      int
+	workspaceCursor         int
+	workspaceOffset         int
+	workspacePreviewOffset  int
+	workspacePendingPath    string
+	workspaceRequest        uint64
+	workspaceEntryRequest   uint64
+	workspaceEntryPending   int
+	workspacePreviewRequest uint64
+	workspaceLoading        bool
+	workspacePreviewLoading bool
+	workspaceExpanded       map[string]bool
+	workspaceLoaded         map[string]bool
 
 	commentMode      commentMode
 	commentItem      provider.Item
@@ -120,6 +145,10 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	comment.ShowLineNumbers = false
 	comment.SetWidth(66)
 	comment.SetHeight(8)
+	fileFilter := textinput.New()
+	fileFilter.Prompt = "Filter files: "
+	fileFilter.Placeholder = "type a path substring"
+	fileFilter.CharLimit = 300
 
 	model := Model{
 		backend:        backend,
@@ -131,6 +160,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		viewport:       viewport.New(80, 20),
 		labels:         labels,
 		comment:        comment,
+		fileFilter:     fileFilter,
 		diffLine:       -1,
 		diffAnchor:     -1,
 		selectedReview: -1,
@@ -141,15 +171,64 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	return model
 }
 
+// NewWithWorktree enables the local Files and Commit tabs before the remote
+// provider tabs. New remains available for embedders that only need remote UI.
+func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace *worktree.Client) Model {
+	return newWithWorkspace(backend, refresh, workspace)
+}
+
+func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspace workspaceClient) Model {
+	model := New(backend, refresh)
+	model.workspace = workspace
+	model.active = 0
+	model.loadingList = false
+	model.workspaceRequest = 1
+	model.workspaceEntryRequest = 1
+	model.workspaceEntryPending = 1
+	model.workspacePreviewRequest = 1
+	model.workspaceLoading = true
+	model.workspaceExpanded = make(map[string]bool)
+	model.workspaceLoaded = make(map[string]bool)
+	return model
+}
+
 func (m Model) Init() tea.Cmd {
-	commands := []tea.Cmd{m.fetchListCmd(m.listRequest, m.kind(), m.filter())}
+	var initial tea.Cmd
+	if m.localTab() {
+		request := m.workspaceRequest
+		if m.active == 0 {
+			request = m.workspaceEntryRequest
+		}
+		initial = m.fetchWorkspaceCmd(request)
+	} else {
+		initial = m.fetchListCmd(m.listRequest, m.kind(), m.filter())
+	}
+	commands := []tea.Cmd{initial}
 	if m.refresh > 0 {
 		commands = append(commands, tickCmd(m.refresh))
 	}
 	return tea.Batch(commands...)
 }
 
-func (m Model) kind() provider.Kind { return kinds[m.active] }
+func (m Model) kind() provider.Kind {
+	index := m.active
+	if m.workspace != nil {
+		index -= 2
+	}
+	if index < 0 || index >= len(kinds) {
+		return provider.PullRequests
+	}
+	return kinds[index]
+}
+
+func (m Model) localTab() bool { return m.workspace != nil && m.active < 2 }
+
+func (m Model) tabCount() int {
+	if m.workspace != nil {
+		return len(kinds) + 2
+	}
+	return len(kinds)
+}
 
 func (m Model) filter() provider.Filter {
 	filters := m.backend.Filters(m.kind())
@@ -220,10 +299,32 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.detail.Item.ID != "" {
 			m.setDetailContent()
 		}
+		if m.localTab() && !m.workspacePreviewLoading && m.active == 0 && m.workspaceFile.Image {
+			width, height := m.workspaceImageDimensions()
+			if width != m.workspaceImageWidth || height != m.workspaceImageHeight {
+				m.workspacePreviewRequest++
+				m.workspacePreviewLoading = true
+				return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, m.workspaceFile, width, height)
+			}
+		}
+		if m.localTab() && !m.workspacePreviewLoading && m.active == 1 && m.workspaceDiff.Path != "" {
+			_, width := workspacePaneWidths(m.width)
+			if width != m.workspaceDiffWidth {
+				m.workspacePreviewRequest++
+				m.workspacePreviewLoading = true
+				return m, m.renderWorkspaceDiffCmd(m.workspacePreviewRequest, m.workspaceDiff, width)
+			}
+		}
 		return m, nil
 
+	case workspaceResultMsg:
+		return m.handleWorkspaceResult(msg)
+
+	case workspaceActionResultMsg:
+		return m.handleWorkspaceActionResult(msg)
+
 	case listResultMsg:
-		if msg.request != m.listRequest || msg.kind != m.kind() || msg.filter != m.filter().Value {
+		if m.localTab() || msg.request != m.listRequest || msg.kind != m.kind() || msg.filter != m.filter().Value {
 			return m, nil
 		}
 		m.loadingList = false
@@ -238,7 +339,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case detailResultMsg:
-		if msg.request != m.detailRequest || msg.item.ID != m.selected.ID || m.screen == listScreen {
+		if m.localTab() || msg.request != m.detailRequest || msg.item.ID != m.selected.ID || m.screen == listScreen {
 			return m, nil
 		}
 		m.loadingDetail = false
@@ -300,7 +401,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			commands = append(commands, tickCmd(m.refresh))
 		}
 		var refreshCmd tea.Cmd
-		if m.screen == detailScreen && !m.actionBusy {
+		if m.localTab() && !m.actionBusy {
+			m.workspaceLoading = false
+			m, refreshCmd = m.startWorkspaceLoad()
+		} else if m.screen == detailScreen && !m.actionBusy {
 			m, refreshCmd = m.startDetailLoad()
 		} else if m.screen == listScreen && !m.actionBusy {
 			m, refreshCmd = m.startListLoad()
@@ -325,6 +429,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == diffScreen {
 			return m.updateDiff(msg)
+		}
+		if m.localTab() {
+			return m.updateWorkspace(msg)
 		}
 		if m.screen == detailScreen {
 			return m.updateDetail(msg)
@@ -356,26 +463,27 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "tab", "]":
-		m.active = (m.active + 1) % len(kinds)
+		m.active = (m.active + 1) % m.tabCount()
 		m.status = ""
-		m.loadingList = false
-		return m.startListLoad()
+		return m.startActiveTabLoad()
 	case "shift+tab", "[":
-		m.active = (m.active - 1 + len(kinds)) % len(kinds)
+		m.active = (m.active - 1 + m.tabCount()) % m.tabCount()
 		m.status = ""
-		m.loadingList = false
-		return m.startListLoad()
-	case "1", "2", "3", "4", "5", "6":
-		m.active = int(msg.Runes[0] - '1')
-		m.status = ""
-		m.loadingList = false
-		return m.startListLoad()
-	case "!", "@", "#", "$", "%", "^":
-		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5}
-		m.active = shiftTabs[msg.String()]
-		m.status = ""
-		m.loadingList = false
-		return m.startListLoad()
+		return m.startActiveTabLoad()
+	case "1", "2", "3", "4", "5", "6", "7", "8":
+		index := int(msg.Runes[0] - '1')
+		if index < m.tabCount() {
+			m.active = index
+			m.status = ""
+			return m.startActiveTabLoad()
+		}
+	case "!", "@", "#", "$", "%", "^", "&", "*":
+		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5, "&": 6, "*": 7}
+		if index := shiftTabs[msg.String()]; index < m.tabCount() {
+			m.active = index
+			m.status = ""
+			return m.startActiveTabLoad()
+		}
 	case "left", "h":
 		return m.changeFilter(-1)
 	case "right", "l":
@@ -887,6 +995,7 @@ func (m *Model) resizeViewport() {
 	}
 	m.comment.SetWidth(min(66, max(20, width-8)))
 	m.comment.SetHeight(min(7, max(3, height/4)))
+	m.fileFilter.Width = max(10, m.width-16)
 }
 
 func (m *Model) setDetailContent() {
@@ -1292,6 +1401,52 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen == commentScreen {
 		return m, nil
 	}
+	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 1 {
+		if tab := m.tabAt(msg.X); tab >= 0 {
+			m.active = tab
+			m.status = ""
+			return m.startActiveTabLoad()
+		}
+	}
+	if m.localTab() {
+		leftWidth, _ := workspacePaneWidths(m.width)
+		if msg.Button == tea.MouseButtonWheelUp {
+			if msg.X >= leftWidth+3 {
+				return m.moveWorkspacePreview(-3), nil
+			}
+			return m.moveWorkspaceCursor(-3)
+		}
+		if msg.Button == tea.MouseButtonWheelDown {
+			if msg.X >= leftWidth+3 {
+				return m.moveWorkspacePreview(3), nil
+			}
+			return m.moveWorkspaceCursor(3)
+		}
+		if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress || msg.Y < 5 {
+			return m, nil
+		}
+		if msg.X >= leftWidth || msg.Y >= 5+m.workspaceListHeight() {
+			return m, nil
+		}
+		row := msg.Y - 5
+		index := m.workspaceOffset + row
+		if m.active == 1 {
+			index = m.workspaceChangeIndexAtRow(row)
+		}
+		length := len(m.filteredWorkspaceEntries())
+		if m.active == 1 {
+			length = len(m.filteredWorkspaceChanges())
+		}
+		if index >= 0 && index < length {
+			m.workspaceCursor = index
+			m.ensureWorkspaceCursorVisible()
+			if m.active == 0 && m.filteredWorkspaceEntries()[index].IsDir {
+				return m.toggleWorkspaceDirectory()
+			}
+			return m.loadSelectedWorkspaceItem()
+		}
+		return m, nil
+	}
 	if m.screen == diffScreen {
 		switch msg.Action {
 		case tea.MouseActionRelease:
@@ -1453,13 +1608,6 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen != listScreen {
 		return m, nil
 	}
-	if msg.Y == 1 {
-		if tab := m.tabAt(msg.X); tab >= 0 {
-			m.active = tab
-			m.loadingList = false
-			return m.startListLoad()
-		}
-	}
 	if msg.Y == 3 {
 		if filter := m.filterAt(msg.X); filter >= 0 {
 			m.filterIndex[m.kind()] = filter
@@ -1480,8 +1628,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) tabAt(x int) int {
 	position := 1
-	for index, kind := range kinds {
-		label := fmt.Sprintf(" %d %s ", index+1, m.backend.TabName(kind))
+	labels := m.tabLabels()
+	start, end := m.tabRange(labels)
+	if start > 0 {
+		position += lipgloss.Width("‹ ")
+	}
+	for index := start; index < end; index++ {
+		name := labels[index]
+		label := fmt.Sprintf(" %d %s ", index+1, name)
 		end := position + lipgloss.Width(label)
 		if x >= position && x < end {
 			return index
@@ -1489,6 +1643,60 @@ func (m Model) tabAt(x int) int {
 		position = end + 1
 	}
 	return -1
+}
+
+func (m Model) tabRange(labels []string) (int, int) {
+	if len(labels) == 0 {
+		return 0, 0
+	}
+	active := min(max(0, m.active), len(labels)-1)
+	available := max(1, m.width)
+	bestStart, bestEnd, bestCount, bestBalance := active, active+1, 1, len(labels)*2
+	for start := 0; start <= active; start++ {
+		for end := active + 1; end <= len(labels); end++ {
+			width := 1
+			if start > 0 {
+				width += lipgloss.Width("‹ ")
+			}
+			if end < len(labels) {
+				width += lipgloss.Width(" ›")
+			}
+			for index := start; index < end; index++ {
+				if index > start {
+					width++
+				}
+				width += lipgloss.Width(fmt.Sprintf(" %d %s ", index+1, labels[index]))
+			}
+			count := end - start
+			balance := absInt((start + end - 1) - 2*active)
+			if width <= available && (count > bestCount || count == bestCount && balance < bestBalance) {
+				bestStart, bestEnd, bestCount, bestBalance = start, end, count, balance
+			}
+		}
+	}
+	return bestStart, bestEnd
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
+func (m Model) tabLabels() []string {
+	labels := make([]string, 0, m.tabCount())
+	if m.workspace != nil {
+		labels = append(labels, "Files", "Commit")
+	}
+	for _, kind := range kinds {
+		name := m.backend.TabName(kind)
+		if kind == provider.Commits {
+			name = "Graph"
+		}
+		labels = append(labels, name)
+	}
+	return labels
 }
 
 func (m Model) filterAt(x int) int {

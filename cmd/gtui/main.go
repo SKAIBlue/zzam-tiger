@@ -10,6 +10,7 @@ import (
 
 	"github.com/jwmtp2/gtui/internal/provider"
 	"github.com/jwmtp2/gtui/internal/tui"
+	"github.com/jwmtp2/gtui/internal/worktree"
 )
 
 var version = "dev"
@@ -36,7 +37,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	model := tui.New(backend, *refresh)
+	workspace := worktree.New(".", provider.ExecRunner{})
+	model := tui.NewWithWorktree(backend, *refresh, workspace)
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "gtui: %v\n", err)

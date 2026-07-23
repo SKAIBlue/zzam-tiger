@@ -33,6 +33,7 @@ var (
 	composerStyle       = detailBoxStyle.Copy().BorderForeground(accent).Background(lipgloss.Color("#1B1F2A"))
 	addedLineStyle      = lipgloss.NewStyle().Foreground(green)
 	removedLineStyle    = lipgloss.NewStyle().Foreground(red)
+	diffGapStyle        = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
 	rangeRowStyle       = lipgloss.NewStyle().Background(lipgloss.Color("#263449"))
 	reviewMetaStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
 	reviewBodyStyle     = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
@@ -60,8 +61,11 @@ func (m Model) View() string {
 }
 
 func (m Model) listView() string {
+	if m.localTab() {
+		return m.workspaceView()
+	}
 	lines := make([]string, 0, m.height)
-	title := fmt.Sprintf(" gtui  %s · %s", m.backend.Name(), m.backend.Repository())
+	title := fmt.Sprintf(" gtui  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
 	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
@@ -72,7 +76,7 @@ func (m Model) listView() string {
 	if m.loadingList && len(items) == 0 {
 		lines = append(lines, metaStyle.Render("  Loading…"))
 	} else if m.err != nil && len(items) == 0 {
-		lines = append(lines, errorStyle.Render("  "+truncate(m.err.Error(), max(1, m.width-2))))
+		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.err.Error()), max(1, m.width-2))))
 	} else if len(items) == 0 {
 		lines = append(lines, metaStyle.Render("  No items for this filter."))
 	} else {
@@ -91,16 +95,133 @@ func (m Model) listView() string {
 }
 
 func (m Model) tabsView() string {
-	parts := make([]string, 0, len(kinds))
-	for index, kind := range kinds {
-		label := fmt.Sprintf(" %d %s ", index+1, m.backend.TabName(kind))
+	labels := m.tabLabels()
+	start, end := m.tabRange(labels)
+	parts := make([]string, 0, end-start)
+	for index := start; index < end; index++ {
+		name := labels[index]
+		label := fmt.Sprintf(" %d %s ", index+1, name)
 		if index == m.active {
 			parts = append(parts, activeTab.Render(label))
 		} else {
 			parts = append(parts, tabStyle.Render(label))
 		}
 	}
-	return " " + strings.Join(parts, " ")
+	leading, trailing := " ", ""
+	if start > 0 {
+		leading += metaStyle.Render("‹ ")
+	}
+	if end < len(labels) {
+		trailing = metaStyle.Render(" ›")
+	}
+	return kittyDeleteImage() + leading + strings.Join(parts, " ") + trailing
+}
+
+func (m Model) workspaceView() string {
+	lines := make([]string, 0, m.height)
+	title := fmt.Sprintf(" gtui  local %s · remote %s/%s", sanitizeWorkspaceLabel(m.workspace.Root()), sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	lines = append(lines, headerStyle.Render(truncate(title, m.width)))
+	lines = append(lines, m.tabsView())
+	lines = append(lines, strings.Repeat("─", max(1, m.width)))
+	filter := m.fileFilter.View()
+	if !m.fileFilter.Focused() {
+		value := m.fileFilter.Value()
+		if value == "" {
+			value = metaStyle.Render("press / to filter paths")
+		}
+		filter = "Filter files: " + value
+	}
+	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
+	lines = append(lines, "")
+
+	bodyHeight := m.workspaceListHeight()
+	leftWidth, rightWidth := workspacePaneWidths(m.width)
+	left := m.workspaceList(leftWidth, bodyHeight)
+	right := ""
+	if m.active == 0 {
+		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightWidth, bodyHeight, m.workspacePreviewOffset)
+	} else {
+		if len(m.workspaceDiffRows) == 0 {
+			right = metaStyle.Render("Select a changed file to inspect its diff.")
+		} else {
+			right = cropWorkspaceRows(m.workspaceDiffRows, bodyHeight, m.workspacePreviewOffset)
+		}
+	}
+	body := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(leftWidth).Height(bodyHeight).Render(left),
+		metaStyle.Render(" │ "),
+		lipgloss.NewStyle().Width(rightWidth).Height(bodyHeight).Render(right),
+	)
+	lines = append(lines, strings.Split(body, "\n")...)
+	for len(lines) < m.height-2 {
+		lines = append(lines, "")
+	}
+	lines = append(lines, m.statusLine())
+	help := " ↑/↓ select · Enter/→ expand · ← collapse · click toggle · PgUp/PgDn preview · / filter"
+	if m.active == 1 {
+		help = " ↑/↓ select · click select · PgUp/PgDn diff · Space toggle stage · s stage · u unstage · / filter"
+	}
+	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
+	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) workspaceList(width, height int) string {
+	if m.workspaceLoading && len(m.workspaceEntries) == 0 && m.active == 0 ||
+		m.workspaceLoading && len(m.filteredWorkspaceChanges()) == 0 && m.active == 1 {
+		return metaStyle.Render(" Loading…")
+	}
+	if m.err != nil {
+		return errorStyle.Render(" " + truncate(sanitizeWorkspaceLabel(m.err.Error()), max(1, width-1)))
+	}
+	rows := make([]string, 0, height)
+	if m.active == 0 {
+		entries := m.filteredWorkspaceEntries()
+		start := min(m.workspaceOffset, len(entries))
+		for index := start; index < len(entries) && len(rows) < height; index++ {
+			entry := entries[index]
+			depth := strings.Count(entry.Path, "/")
+			icon := "·"
+			if entry.IsDir {
+				icon = "▸"
+				if m.workspaceExpanded[entry.Path] {
+					icon = "▾"
+				}
+			}
+			row := strings.Repeat("  ", depth) + icon + " " + sanitizeWorkspaceLabel(entry.Name)
+			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
+			if index == m.workspaceCursor {
+				row = selectedRow.Render(row)
+			}
+			rows = append(rows, row)
+		}
+		if len(entries) == 0 {
+			rows = append(rows, metaStyle.Render(" No matching files."))
+		}
+		return strings.Join(rows, "\n")
+	}
+
+	changes := m.filteredWorkspaceChanges()
+	for _, display := range m.workspaceChangeRows() {
+		if display.index < 0 {
+			rows = append(rows, sectionTitleStyle.Render(truncate(" "+display.title, width)))
+			continue
+		}
+		change := display.item.change
+		badge := string(change.Code)
+		if badge == "?" {
+			badge = "U"
+		}
+		row := fmt.Sprintf("  %s %s", badge, sanitizeWorkspaceLabel(change.Path))
+		row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
+		if display.index == m.workspaceCursor {
+			row = selectedRow.Render(row)
+		}
+		rows = append(rows, row)
+	}
+	if len(changes) == 0 {
+		rows = append(rows, metaStyle.Render(" Working tree clean."))
+	}
+	return strings.Join(rows[:min(len(rows), height)], "\n")
 }
 
 func (m Model) filtersView() string {
@@ -153,7 +274,7 @@ func (m Model) itemRow(item provider.Item, selected bool) string {
 }
 
 func (m Model) listHelp() string {
-	help := " ↑/↓ select · ←/→ filter · Shift+1...6 tabs · Enter detail"
+	help := fmt.Sprintf(" ↑/↓ select · ←/→ filter · Shift+1...%d tabs · Enter detail", m.tabCount())
 	if m.kind() == provider.Issues {
 		help += " · C close · O open"
 	}
@@ -228,7 +349,7 @@ func (m Model) detailView() string {
 		}
 		lines = append(lines, strings.Join(loading[:m.viewport.Height], "\n"))
 	} else if m.err != nil && m.detail.Item.ID == "" {
-		failure := []string{"", errorStyle.Render("  Unable to load detail: " + truncate(m.err.Error(), max(10, m.width-26)))}
+		failure := []string{"", errorStyle.Render("  Unable to load detail: " + truncate(sanitizeWorkspaceLabel(m.err.Error()), max(10, m.width-26)))}
 		for len(failure) < m.viewport.Height {
 			failure = append(failure, "")
 		}
@@ -317,7 +438,7 @@ func (m Model) commentOverlay(background string) string {
 	comment.SetWidth(max(12, composerWidth-4))
 	body := sectionTitleStyle.Render(title) + "\n" + comment.View()
 	if m.err != nil {
-		body += "\n" + errorStyle.Render(m.err.Error())
+		body += "\n" + errorStyle.Render(sanitizeWorkspaceLabel(m.err.Error()))
 	}
 	body += "\n" + metaStyle.Render("Ctrl+S submit · Esc cancel")
 	composer := composerStyle.Width(composerWidth).Render(body)
@@ -543,17 +664,17 @@ func wrapReviewBody(body string, width int) string {
 
 func (m Model) statusLine() string {
 	if m.err != nil {
-		return errorStyle.Render(truncate(" Error: "+m.err.Error(), m.width))
+		return errorStyle.Render(truncate(" Error: "+sanitizeWorkspaceLabel(m.err.Error()), m.width))
 	}
 	if m.status != "" {
 		return statusStyle.Render(truncate(" "+m.status, m.width))
 	}
-	if m.loadingList || m.loadingDetail || m.actionBusy {
+	if m.loadingList || m.loadingDetail || m.workspaceLoading || m.workspacePreviewLoading || m.actionBusy {
 		return metaStyle.Render(" Updating…")
 	}
 	if !m.lastUpdated.IsZero() {
 		limit := ""
-		if m.screen == listScreen && len(m.items[m.kind()]) >= 100 {
+		if m.screen == listScreen && !m.localTab() && len(m.items[m.kind()]) >= 100 {
 			limit = " · showing latest 100"
 		}
 		return metaStyle.Render(fmt.Sprintf(" Updated %s · auto-refresh %s%s", m.lastUpdated.Format("15:04:05"), refreshLabel(m.refresh), limit))
