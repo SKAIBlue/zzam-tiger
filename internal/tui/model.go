@@ -29,6 +29,7 @@ const (
 	listScreen screen = iota
 	detailScreen
 	labelScreen
+	branchScreen
 	diffScreen
 	commentScreen
 )
@@ -81,8 +82,9 @@ type detailResultMsg struct {
 }
 
 type actionResultMsg struct {
-	action string
-	err    error
+	action      string
+	refreshList bool
+	err         error
 }
 
 type tickMsg time.Time
@@ -134,6 +136,9 @@ type Model struct {
 	detail           provider.Detail
 	viewport         viewport.Model
 	labels           textinput.Model
+	branchInput      textinput.Model
+	branchAction     string
+	branchTarget     provider.Item
 	comment          textarea.Model
 	fileFilter       textinput.Model
 	graphQuery       textinput.Model
@@ -221,6 +226,9 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	labels.Prompt = "Labels (comma separated): "
 	labels.CharLimit = 500
 	labels.Width = 50
+	branchInput := textinput.New()
+	branchInput.CharLimit = 250
+	branchInput.Width = 50
 	comment := textarea.New()
 	comment.Placeholder = "Write Markdown…"
 	comment.ShowLineNumbers = false
@@ -251,6 +259,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		offset:         make(map[provider.Kind]int),
 		viewport:       viewport.New(80, 20),
 		labels:         labels,
+		branchInput:    branchInput,
 		comment:        comment,
 		fileFilter:     fileFilter,
 		graphQuery:     graphQuery,
@@ -467,7 +476,10 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if m.localGitList(kind) || workspace != nil && kind == provider.Commits {
+		// Branch management must operate on local refs and remote-tracking refs,
+		// not the hosting provider's branch API. This keeps LOCAL/REMOTE labels
+		// and the selected deletion target consistent regardless of connectivity.
+		if m.localGitList(kind) || workspace != nil && (kind == provider.Commits || kind == provider.Branches) {
 			if kind == provider.Branches {
 				branches, err := workspace.Branches(ctx)
 				items := make([]provider.Item, 0, len(branches))
@@ -545,10 +557,14 @@ func (m Model) fetchDetailCmd(request uint64, kind provider.Kind, item provider.
 }
 
 func (m Model) actionCmd(name string, run func(context.Context) error) tea.Cmd {
+	return m.actionCmdWithListRefresh(name, false, run)
+}
+
+func (m Model) actionCmdWithListRefresh(name string, refreshList bool, run func(context.Context) error) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		return actionResultMsg{action: name, err: run(ctx)}
+		return actionResultMsg{action: name, refreshList: refreshList, err: run(ctx)}
 	}
 }
 
@@ -769,6 +785,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.loadingList = false
 		m.loadingDetail = false
+		if msg.refreshList {
+			m, listRefresh := m.startListLoad()
+			if m.screen == listScreen {
+				return m, listRefresh
+			}
+			m, detailRefresh := m.startDetailLoad()
+			return m, tea.Batch(listRefresh, detailRefresh)
+		}
 		if m.screen == listScreen {
 			return m.startListLoad()
 		}
@@ -802,6 +826,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == labelScreen {
 			return m.updateLabelInput(msg)
+		}
+		if m.screen == branchScreen {
+			return m.updateBranchInput(msg)
 		}
 		if m.screen == commentScreen {
 			return m.updateCommentInput(msg)
@@ -942,14 +969,42 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.kind() == provider.Commits {
 			return m, m.graphQuery.Focus()
 		}
-	case "o", "p", "z", "Z", "v":
+	case "n":
+		if m.workspace != nil && m.kind() == provider.Branches {
+			return m.openBranchInput("create", provider.Item{})
+		}
+	case "o":
+		if m.workspace != nil && m.kind() == provider.Branches {
+			if item, ok := m.currentListItem(); ok {
+				if item.State == "remote" {
+					m.status = "check out a local branch"
+					return m, nil
+				}
+				return m.startBranchAction("checkout", item)
+			}
+		}
+		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
+			return m.startIssueStateAction(item, true)
+		}
+	case "e":
+		if m.workspace != nil && m.kind() == provider.Branches {
+			if item, ok := m.currentListItem(); ok {
+				if item.State == "remote" {
+					m.status = "rename a local branch"
+					return m, nil
+				}
+				return m.openBranchInput("rename", item)
+			}
+		}
+	case "d":
+		if m.workspace != nil && m.kind() == provider.Branches {
+			if item, ok := m.currentListItem(); ok {
+				return m.openBranchConfirm(item)
+			}
+		}
+	case "p", "z", "Z", "v":
 		if m.workspace != nil && m.kind() == provider.Commits {
 			return m, m.startGraphAction(msg.String())
-		}
-		if msg.String() == "o" {
-			if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
-				return m.startIssueStateAction(item, true)
-			}
 		}
 	case "up", "k":
 		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
@@ -1016,6 +1071,98 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startListLoad()
 	}
 	return m, nil
+}
+
+func (m Model) openBranchInput(action string, target provider.Item) (tea.Model, tea.Cmd) {
+	m.branchAction, m.branchTarget = action, target
+	m.screen = branchScreen
+	m.branchInput.SetValue("")
+	if action == "rename" {
+		m.branchInput.Prompt = "New branch name: "
+	} else {
+		m.branchInput.Prompt = "New branch name: "
+	}
+	m.branchInput.CursorStart()
+	m.status, m.err = "", nil
+	return m, m.branchInput.Focus()
+}
+
+func (m Model) openBranchConfirm(item provider.Item) (tea.Model, tea.Cmd) {
+	if item.State == "remote" {
+		remote, name, ok := strings.Cut(item.ID, "/")
+		if !ok || remote == "" || name == "" || name == "HEAD" {
+			m.status = "select a remote branch, not its HEAD reference"
+			return m, nil
+		}
+	}
+	m.branchAction, m.branchTarget = "delete", item
+	m.screen = branchScreen
+	m.branchInput.Blur()
+	m.status, m.err = "", nil
+	return m, nil
+}
+
+func (m Model) updateBranchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.branchAction == "delete" {
+		switch msg.String() {
+		case "esc", "n", "N":
+			m.screen, m.status = listScreen, "branch deletion cancelled"
+			return m, nil
+		case "y", "Y":
+			m.screen = listScreen
+			return m.startBranchAction("delete", m.branchTarget)
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.screen, m.status = listScreen, "branch action cancelled"
+		m.branchInput.Blur()
+		return m, nil
+	case "enter":
+		name := strings.TrimSpace(m.branchInput.Value())
+		if name == "" {
+			m.status = "branch name is required"
+			return m, nil
+		}
+		m.branchInput.Blur()
+		m.screen = listScreen
+		if m.branchAction == "rename" {
+			return m.startBranchRename(m.branchTarget, name)
+		}
+		return m.startBranchCreate(name)
+	}
+	var cmd tea.Cmd
+	m.branchInput, cmd = m.branchInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) startBranchCreate(name string) (tea.Model, tea.Cmd) {
+	base := ""
+	if item, ok := m.currentListItem(); ok {
+		base = item.ID
+	}
+	m.actionBusy, m.status = true, "creating branch…"
+	return m, m.actionCmdWithListRefresh("create branch "+name, true, func(ctx context.Context) error { return m.workspace.CreateBranch(ctx, name, base) })
+}
+
+func (m Model) startBranchRename(item provider.Item, name string) (tea.Model, tea.Cmd) {
+	m.actionBusy, m.status = true, "renaming branch…"
+	return m, m.actionCmdWithListRefresh("rename branch "+item.ID, true, func(ctx context.Context) error { return m.workspace.RenameBranch(ctx, item.ID, name) })
+}
+
+func (m Model) startBranchAction(action string, item provider.Item) (tea.Model, tea.Cmd) {
+	m.actionBusy = true
+	if action == "checkout" {
+		m.status = "checking out branch…"
+		return m, m.actionCmdWithListRefresh("checkout branch "+item.ID, true, func(ctx context.Context) error { return m.workspace.CheckoutBranch(ctx, item.ID) })
+	}
+	m.status = "deleting branch…"
+	if item.State == "remote" {
+		remote, name, _ := strings.Cut(item.ID, "/")
+		return m, m.actionCmdWithListRefresh("delete remote branch "+item.ID, true, func(ctx context.Context) error { return m.workspace.DeleteRemoteBranch(ctx, remote, name) })
+	}
+	return m, m.actionCmdWithListRefresh("delete branch "+item.ID, true, func(ctx context.Context) error { return m.workspace.DeleteBranch(ctx, item.ID) })
 }
 
 func (m Model) visibleListItems() []provider.Item {
@@ -1220,7 +1367,7 @@ func (m Model) startIssueStateAction(item provider.Item, open bool) (tea.Model, 
 		action = "reopen issue"
 		m.status = "reopening issue…"
 	}
-	return m, m.actionCmd(action, func(ctx context.Context) error {
+	return m, m.actionCmdWithListRefresh(action, !open, func(ctx context.Context) error {
 		return m.backend.SetIssueState(ctx, item, open)
 	})
 }

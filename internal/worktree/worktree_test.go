@@ -277,11 +277,17 @@ func TestBranchesListsLocalAndRemoteRefs(t *testing.T) {
 	git(t, repo, "commit", "-m", "initial")
 	git(t, repo, "branch", "topic")
 	git(t, repo, "update-ref", "refs/remotes/origin/topic", "HEAD")
+	git(t, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/topic")
 	branches, err := New(repo, provider.ExecRunner{}).Branches(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	var main, topic, remoteTopic Branch
+	for _, branch := range branches {
+		if branch.Name == "origin/HEAD" {
+			t.Fatalf("remote HEAD pointer must not be listed as a branch: %#v", branches)
+		}
+	}
 	for _, branch := range branches {
 		switch branch.Name {
 		case "master", "main":
@@ -300,6 +306,42 @@ func TestBranchesListsLocalAndRemoteRefs(t *testing.T) {
 	}
 	if main.Name == "" || !main.Head || topic.Name == "" || remoteTopic.Name == "" {
 		t.Fatalf("branches = %#v", branches)
+	}
+}
+
+func TestBranchManagementOperations(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "main.txt", []byte("main"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	client := New(repo, provider.ExecRunner{})
+	ctx := context.Background()
+
+	if err := client.CreateBranch(ctx, "topic", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckoutBranch(ctx, "topic"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(git(t, repo, "branch", "--show-current"))); got != "topic" {
+		t.Fatalf("checked out %q, want topic", got)
+	}
+	if err := client.RenameBranch(ctx, "topic", "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	base := strings.TrimSpace(string(git(t, repo, "branch", "--show-current")))
+	if base != "renamed" {
+		t.Fatalf("renamed branch = %q", base)
+	}
+	git(t, repo, "checkout", "-q", "-b", "other")
+	if err := client.DeleteBranch(ctx, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := client.runner.Run(ctx, "git", "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/renamed"); err == nil || len(out) != 0 {
+		t.Fatal("renamed branch still exists")
+	}
+	if err := client.CreateBranch(ctx, "bad name", ""); err == nil {
+		t.Fatal("invalid branch name was accepted")
 	}
 }
 

@@ -36,6 +36,7 @@ type fakeWorkspace struct {
 	commits      []string
 	history      []worktree.Commit
 	branches     []worktree.Branch
+	branchCalls  []string
 }
 
 type fakeWorkspaceWatcher struct {
@@ -164,6 +165,83 @@ func (*fakeWorkspace) CommitPaths(context.Context, string) ([]string, error) { r
 func (w *fakeWorkspace) Branches(context.Context) ([]worktree.Branch, error) {
 	return w.branches, nil
 }
+func (w *fakeWorkspace) CreateBranch(_ context.Context, name, start string) error {
+	w.branchCalls = append(w.branchCalls, "create:"+name+":"+start)
+	return nil
+}
+func (w *fakeWorkspace) CheckoutBranch(_ context.Context, name string) error {
+	w.branchCalls = append(w.branchCalls, "checkout:"+name)
+	return nil
+}
+func (w *fakeWorkspace) RenameBranch(_ context.Context, old, new string) error {
+	w.branchCalls = append(w.branchCalls, "rename:"+old+":"+new)
+	return nil
+}
+func (w *fakeWorkspace) DeleteBranch(_ context.Context, name string) error {
+	w.branchCalls = append(w.branchCalls, "delete:"+name)
+	return nil
+}
+func (w *fakeWorkspace) DeleteRemoteBranch(_ context.Context, remote, name string) error {
+	w.branchCalls = append(w.branchCalls, "remote-delete:"+remote+":"+name)
+	return nil
+}
+
+func TestBranchActionsRequireConfirmationAndRefresh(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = 3 // Branches tab in a workspace-enabled model.
+	m.items[provider.Branches] = []provider.Item{{ID: "main", Title: "main", State: "local"}, {ID: "origin/topic", Title: "origin/topic", State: "remote"}}
+
+	updated, cmd := m.Update(key('d'))
+	m = updated.(Model)
+	if cmd != nil || m.screen != branchScreen || len(workspace.branchCalls) != 0 {
+		t.Fatal("delete ran before confirmation")
+	}
+	updated, cmd = m.Update(key('n'))
+	m = updated.(Model)
+	if cmd != nil || m.screen != listScreen || len(workspace.branchCalls) != 0 {
+		t.Fatal("delete cancellation changed branches")
+	}
+
+	updated, _ = m.Update(key('d'))
+	m = updated.(Model)
+	updated, cmd = m.Update(key('y'))
+	m = updated.(Model)
+	if cmd == nil || !m.actionBusy {
+		t.Fatal("confirmed deletion did not start")
+	}
+	updated, refresh := m.Update(cmd())
+	m = updated.(Model)
+	if refresh == nil || len(workspace.branchCalls) != 1 || workspace.branchCalls[0] != "delete:main" || !m.loadingList {
+		t.Fatalf("local delete = %#v, refreshing=%t", workspace.branchCalls, m.loadingList)
+	}
+
+	m.loadingList = false
+	m.cursor[provider.Branches] = 1
+	updated, _ = m.Update(key('d'))
+	m = updated.(Model)
+	updated, cmd = m.Update(key('y'))
+	m = updated.(Model)
+	_ = cmd()
+	if got := workspace.branchCalls[1]; got != "remote-delete:origin:topic" {
+		t.Fatalf("remote deletion = %q", got)
+	}
+}
+
+func TestRemoteBranchDeletionConfirmationShowsRemoteAndGitOperation(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width, m.height = 100, 30
+	m.active = 3
+	m.screen = branchScreen
+	m.branchAction = "delete"
+	m.branchTarget = provider.Item{ID: "origin/topic", State: "remote"}
+	view := m.View()
+	for _, want := range []string{"Delete remote branch?", "Remote: origin", "Branch: topic", "git push origin --delete topic"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("confirmation missing %q:\n%s", want, view)
+		}
+	}
+}
 
 func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
@@ -199,6 +277,24 @@ func TestUnavailableProviderShowsOnlyLocalGraphAndBranches(t *testing.T) {
 	m = updatedModel.(Model)
 	if detail != nil || m.screen != listScreen || !strings.Contains(m.status, "remote provider") {
 		t.Fatalf("local Branches detail state: screen=%v cmd=%v status=%q", m.screen, detail != nil, m.status)
+	}
+}
+
+func TestBranchesAlwaysUseLocalGitRefs(t *testing.T) {
+	workspace := &fakeWorkspace{branches: []worktree.Branch{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = 3 // Branches
+	updated, cmd := m.startListLoad()
+	m = updated
+	if cmd == nil {
+		t.Fatal("Branches did not start a local Git load")
+	}
+	result, ok := cmd().(listResultMsg)
+	if !ok {
+		t.Fatalf("Branches command result = %T", cmd())
+	}
+	if len(result.items) != 2 || result.items[0].State != "local" || result.items[1].State != "remote" {
+		t.Fatalf("branch items = %#v", result.items)
 	}
 }
 

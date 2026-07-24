@@ -388,6 +388,68 @@ func (c *Client) Revert(ctx context.Context, sha string) error {
 	return c.historyAction(ctx, sha, "revert", "--no-edit", sha)
 }
 
+// CreateBranch creates name at start. An empty start uses the current HEAD.
+func (c *Client) CreateBranch(ctx context.Context, name, start string) error {
+	if err := validateBranchName(name); err != nil {
+		return err
+	}
+	args := []string{"branch", "--", name}
+	if strings.TrimSpace(start) != "" {
+		args = append(args, start)
+	}
+	_, err := c.git(ctx, args...)
+	return err
+}
+
+// CheckoutBranch switches to a local branch.
+func (c *Client) CheckoutBranch(ctx context.Context, name string) error {
+	if err := validateBranchName(name); err != nil {
+		return err
+	}
+	_, err := c.git(ctx, "switch", "--", name)
+	return err
+}
+
+// RenameBranch renames a local branch.
+func (c *Client) RenameBranch(ctx context.Context, oldName, newName string) error {
+	if err := validateBranchName(oldName); err != nil {
+		return err
+	}
+	if err := validateBranchName(newName); err != nil {
+		return err
+	}
+	_, err := c.git(ctx, "branch", "-m", "--", oldName, newName)
+	return err
+}
+
+// DeleteBranch deletes a local branch without forcing Git's merged-branch check.
+func (c *Client) DeleteBranch(ctx context.Context, name string) error {
+	if err := validateBranchName(name); err != nil {
+		return err
+	}
+	_, err := c.git(ctx, "branch", "-d", "--", name)
+	return err
+}
+
+// DeleteRemoteBranch deletes branch from remote rather than its local tracking ref.
+func (c *Client) DeleteRemoteBranch(ctx context.Context, remote, name string) error {
+	if strings.TrimSpace(remote) == "" || strings.HasPrefix(remote, "-") || strings.ContainsAny(remote, " \t\n") {
+		return fmt.Errorf("invalid remote name")
+	}
+	if err := validateBranchName(name); err != nil {
+		return err
+	}
+	_, err := c.git(ctx, "push", remote, "--delete", name)
+	return err
+}
+
+func validateBranchName(name string) error {
+	if name == "" || strings.TrimSpace(name) != name || strings.HasPrefix(name, "-") || name == "@" || strings.HasSuffix(name, ".") || strings.HasSuffix(name, ".lock") || strings.Contains(name, "..") || strings.Contains(name, "@{") || strings.Contains(name, "//") || strings.ContainsAny(name, " ~^:?*[\\\t\n") {
+		return fmt.Errorf("invalid branch name %q", name)
+	}
+	return nil
+}
+
 // CommitPaths returns the paths changed by commit. It uses NUL-delimited output
 // so paths containing whitespace or newlines remain intact.
 func (c *Client) CommitPaths(ctx context.Context, sha string) ([]string, error) {
@@ -429,6 +491,11 @@ func (c *Client) Branches(ctx context.Context) ([]Branch, error) {
 			branch.Name = strings.TrimPrefix(ref, "refs/heads/")
 		case strings.HasPrefix(ref, "refs/remotes/"):
 			branch.Name = strings.TrimPrefix(ref, "refs/remotes/")
+			// refs such as refs/remotes/origin/HEAD are symbolic pointers to a
+			// remote's default branch, not branches users can manage.
+			if strings.HasSuffix(branch.Name, "/HEAD") {
+				continue
+			}
 			branch.Remote = true
 		default:
 			continue

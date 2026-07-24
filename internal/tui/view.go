@@ -70,7 +70,11 @@ func (m Model) View() string {
 	if m.screen == detailScreen || m.screen == labelScreen {
 		return m.detailView()
 	}
-	return m.listView()
+	view := m.listView()
+	if m.screen == branchScreen {
+		return m.branchOverlay(view)
+	}
+	return view
 }
 
 func (m Model) listView() string {
@@ -563,6 +567,9 @@ func (m Model) listHelp() string {
 	if m.workspace != nil && m.kind() == provider.Commits {
 		help = " ↑/↓ select · / search · ←/→ author scope · o checkout · p cherry-pick · z soft reset · Z hard reset · v revert"
 	}
+	if m.workspace != nil && m.kind() == provider.Branches {
+		help = " ↑/↓ select · n create · o checkout · e rename · d delete · Enter detail"
+	}
 	if m.kind() == provider.Issues {
 		help += " · C close · O open"
 	}
@@ -573,6 +580,28 @@ func (m Model) listHelp() string {
 		help += " · X cancel · R rerun"
 	}
 	return help + " · r refresh · q quit"
+}
+
+func (m Model) branchOverlay(background string) string {
+	modalWidth := min(max(42, m.width-12), 76)
+	if m.branchAction == "delete" {
+		kind, target, operation := "local", "Local branch: "+m.branchTarget.ID, "git branch -d -- "+m.branchTarget.ID
+		if m.branchTarget.State == "remote" {
+			remote, name, _ := strings.Cut(m.branchTarget.ID, "/")
+			kind = "remote"
+			target = "Remote: " + remote + "\nBranch: " + name
+			operation = "git push " + remote + " --delete " + name
+		}
+		modal := detailBoxStyle.Width(modalWidth).Render(sectionTitleStyle.Render("Delete "+kind+" branch?") + "\n\n" + target + "\n\n" + metaStyle.Render(operation) + "\n" + errorStyle.Render("This cannot be undone.") + "\n\n" + metaStyle.Render("y delete · n/Esc cancel"))
+		return placeOverlay(m.width, m.height, modal, background)
+	}
+	title := "Create branch"
+	hint := "Created from the selected branch, or HEAD when none is selected."
+	if m.branchAction == "rename" {
+		title, hint = "Rename branch "+m.branchTarget.ID, "Enter apply · Esc cancel"
+	}
+	modal := detailBoxStyle.Width(modalWidth).Render(sectionTitleStyle.Render(title) + "\n\n" + m.branchInput.View() + "\n\n" + metaStyle.Render(hint+" · Enter apply · Esc cancel"))
+	return placeOverlay(m.width, m.height, modal, background)
 }
 
 func assigneeLabel(assignees []provider.Assignee) string {

@@ -42,6 +42,11 @@ type workspaceClient interface {
 	History(context.Context, int) ([]worktree.Commit, error)
 	CommitPaths(context.Context, string) ([]string, error)
 	Branches(context.Context) ([]worktree.Branch, error)
+	CreateBranch(context.Context, string, string) error
+	CheckoutBranch(context.Context, string) error
+	RenameBranch(context.Context, string, string) error
+	DeleteBranch(context.Context, string) error
+	DeleteRemoteBranch(context.Context, string, string) error
 }
 
 type workspaceResultMsg struct {

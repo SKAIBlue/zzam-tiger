@@ -438,6 +438,27 @@ func TestIssueStateShortcutsWorkFromList(t *testing.T) {
 	}
 }
 
+func TestClosingIssueFromDetailRefreshesList(t *testing.T) {
+	backend := &actionProvider{}
+	m := New(backend, 0)
+	m.active = 1 // Issues
+	m.screen = detailScreen
+	m.selected = provider.Item{ID: "8", Title: "issue"}
+	m.detail = provider.Detail{Item: m.selected}
+
+	updated, closeCmd := m.Update(key('c'))
+	m = updated.(Model)
+	if closeCmd == nil || !m.actionBusy {
+		t.Fatal("close did not start from issue detail")
+	}
+
+	updated, refresh := m.Update(closeCmd())
+	m = updated.(Model)
+	if refresh == nil || !m.loadingList || !m.loadingDetail {
+		t.Fatalf("closing issue did not refresh both list and detail: list=%t detail=%t", m.loadingList, m.loadingDetail)
+	}
+}
+
 func TestAssignmentShortcutsWorkFromList(t *testing.T) {
 	for _, test := range []struct {
 		key      rune
