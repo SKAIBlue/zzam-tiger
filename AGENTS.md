@@ -5,6 +5,23 @@
 - After completing modifications, install the local build as `$HOME/.local/bin/zt-beta` (create `$HOME/.local/bin` if needed). Do not overwrite the regular `zt` installation or install the beta under GOPATH.
 - Use `go build -o "$HOME/.local/bin/zt-beta" ./cmd/zt` so the instruction works on every developer machine without hard-coded user paths.
 
+## TUI Modal Usage
+
+Use `Model.OpenModal(ModalRequest{...})` for interactive overlays. `ModalRequest` accepts `HasConfirm` and ordered `ModalItem` values. Supported item types are `select`, `text`, `divider`, `input`, and `button`; `select` options are nested in `Items`. `ID` identifies returned values, `Default` supplies an input/default selection, `Required` validates input/select controls, and `CloseOnClick` makes a button return `true` under its ID.
+
+After a modal closes, call `LastModalResult()` to retrieve `{Confirm, Results}`. `Confirm` is false after Escape/Cancel. Modal input owns keyboard and mouse events while visible; do not add underlying-screen shortcut handling for an open modal.
+
+```go
+m, _ = m.OpenModal(tui.ModalRequest{
+    HasConfirm: true,
+    Items: []tui.ModalItem{
+        {Type: "select", ID: "language", Text: "언어 선택", Items: []tui.ModalItem{{ID: "ko", Text: "한국어"}, {ID: "en", Text: "English"}}},
+        {Type: "input", ID: "filter", Text: "Filter", Default: "홍", Required: true},
+        {Type: "button", ID: "commit", Text: "Commit", CloseOnClick: true},
+    },
+})
+```
+
 ## GitHub Issue Management
 
 - Use the GitHub CLI (`gh`) for all issue-management operations, including creating, viewing, searching, editing, commenting on, linking, and closing issues.

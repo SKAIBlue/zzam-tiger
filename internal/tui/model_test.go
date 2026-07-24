@@ -156,6 +156,51 @@ func key(value rune) tea.KeyMsg {
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{value}}
 }
 
+func TestModalCollectsFormResultsAndTrapsInput(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height, m.active = 80, 24, 2
+	m, _ = m.OpenModal(ModalRequest{HasConfirm: true, Items: []ModalItem{
+		{Type: "select", ID: "language", Text: "Language", Items: []ModalItem{{ID: "ko", Text: "Korean"}, {ID: "en", Text: "English"}}},
+		{Type: "input", ID: "filter", Text: "Filter", Default: "홍", Required: true},
+		{Type: "button", ID: "commit", Text: "Commit", CloseOnClick: true},
+	}})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight}) // choose Korean
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // input
+	m = updated.(Model)
+	updated, _ = m.Update(key('길'))
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // button
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	result, ok := m.LastModalResult()
+	if !ok || !result.Confirm || result.Results["language"] != "ko" || result.Results["filter"] != "홍길" || result.Results["commit"] != true {
+		t.Fatalf("modal result = %#v, available=%t", result, ok)
+	}
+	if m.active != 2 {
+		t.Fatalf("modal input changed underlying tab: %d", m.active)
+	}
+}
+
+func TestEscapeClosesOpenModal(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height = 80, 24
+	m, _ = m.OpenModal(ModalRequest{Title: "Dismiss me", HasConfirm: true, Items: []ModalItem{{Type: "input", ID: "filter", Text: "Filter", Default: "홍"}}})
+	if m.modal == nil {
+		t.Fatal("modal did not open")
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if cmd != nil || m.modal != nil {
+		t.Fatalf("Esc did not close modal: command=%v modal=%#v", cmd != nil, m.modal)
+	}
+	result, ok := m.LastModalResult()
+	if !ok || result.Confirm || result.Results["filter"] != "홍" {
+		t.Fatalf("Esc result = %#v, available=%t", result, ok)
+	}
+}
+
 func TestUpdateButtonAppearsAndStartsInstaller(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.width, m.height = 80, 20

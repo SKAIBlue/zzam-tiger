@@ -157,6 +157,9 @@ type Model struct {
 	branchInput      textinput.Model
 	branchAction     string
 	branchTarget     provider.Item
+	modal            *modalState
+	lastModalResult  *ModalResult
+	modalError       string
 	comment          textarea.Model
 	fileFilter       textinput.Model
 	graphQuery       textinput.Model // shared Search input for non-workspace tabs
@@ -855,6 +858,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(commands...)
 
 	case tea.MouseMsg:
+		if m.modal != nil {
+			return m.updateModalMouse(msg)
+		}
 		return m.handleMouse(msg)
 
 	case WheelScrollMsg:
@@ -863,6 +869,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.modal != nil {
+			next, cmd := m.updateModal(msg)
+			updated := next.(Model)
+			if updated.branchAction == "delete" && updated.modal == nil && updated.lastModalResult != nil {
+				result := *updated.lastModalResult
+				updated.lastModalResult = nil
+				updated.screen = listScreen
+				if result.Confirm {
+					return updated.startBranchAction("delete", updated.branchTarget)
+				}
+				updated.status = "branch deletion cancelled"
+			}
+			return updated, cmd
 		}
 		if m.screen == labelScreen {
 			return m.updateLabelInput(msg)
@@ -1234,7 +1254,12 @@ func (m Model) openBranchConfirm(item provider.Item) (tea.Model, tea.Cmd) {
 	m.screen = branchScreen
 	m.branchInput.Blur()
 	m.status, m.err = "", nil
-	return m, nil
+	kind, target, operation := "local", "Local branch: "+item.ID, "git branch -d -- "+item.ID
+	if item.State == "remote" {
+		remote, name, _ := strings.Cut(item.ID, "/")
+		kind, target, operation = "remote", "Remote: "+remote+"\nBranch: "+name, "git push "+remote+" --delete "+name
+	}
+	return m.OpenModal(ModalRequest{Title: "Delete " + kind + " branch?", HasConfirm: true, Items: []ModalItem{{Type: "text", Text: target}, {Type: "text", Text: operation}, {Type: "text", Text: "This cannot be undone."}}})
 }
 
 func (m Model) updateBranchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

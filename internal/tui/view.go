@@ -57,6 +57,17 @@ func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
 		return "Starting Zzam Tiger…"
 	}
+	if m.modal != nil {
+		background := m.baseView()
+		if m.screen == branchScreen {
+			background = m.listView()
+		}
+		return m.modalOverlay(background)
+	}
+	return m.baseView()
+}
+
+func (m Model) baseView() string {
 	if m.screen == diffScreen {
 		return m.diffView()
 	}
