@@ -304,6 +304,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		m.workspaceImageWidth = msg.width
 		m.workspaceImageHeight = msg.height
 		m.workspacePreviewLoading = false
+		m = m.moveWorkspacePreview(0)
 		width, height := m.workspaceImageDimensions()
 		if msg.file.Image && (msg.width != width || msg.height != height) {
 			m.workspacePreviewRequest++
@@ -369,15 +370,18 @@ func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Mo
 func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 	m.workspacePreviewLoading = false
 	m.workspacePreviewRequest++
-	m.workspacePreviewOffset = 0
 	m.workspaceImage = ""
 	m.workspaceImageWidth = 0
 	m.workspaceImageHeight = 0
 	if m.active == workspaceFilesTab {
 		entries := m.filteredWorkspaceEntries()
 		if len(entries) == 0 || entries[m.workspaceCursor].IsDir {
+			m.workspacePreviewOffset = 0
 			m.workspaceFile = worktree.File{}
 			return m, nil
+		}
+		if entries[m.workspaceCursor].Path != m.workspaceFile.Path {
+			m.workspacePreviewOffset = 0
 		}
 		m.workspacePreviewLoading = true
 		return m, m.fetchWorkspaceFileCmd(m.workspacePreviewRequest, entries[m.workspaceCursor].Path)
@@ -386,13 +390,18 @@ func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 	m.workspaceDiffWidth = 0
 	changes := m.filteredWorkspaceChanges()
 	if len(changes) == 0 {
+		m.workspacePreviewOffset = 0
 		m.workspaceDiff = worktree.Diff{}
 		return m, nil
 	}
 	selected := changes[m.workspaceCursor]
 	if selected.isDir {
+		m.workspacePreviewOffset = 0
 		m.workspaceDiff = worktree.Diff{}
 		return m, nil
+	}
+	if selected.displayPath() != m.workspaceDiff.Path {
+		m.workspacePreviewOffset = 0
 	}
 	m.workspacePreviewLoading = true
 	return m, m.fetchWorkspaceDiffCmd(m.workspacePreviewRequest, selected.displayPath(), selected.staged)
@@ -750,6 +759,11 @@ func (m Model) workspacePreviewLineCount() int {
 		if m.workspaceFile.Image || m.workspaceFile.Binary || !utf8.Valid(m.workspaceFile.Data) {
 			return 2
 		}
+		if isMarkdownPath(m.workspaceFile.Path) {
+			_, width := m.workspacePaneWidths()
+			content := renderWorkspaceMarkdownContent(m.workspaceFile.Data, width)
+			return 1 + len(strings.Split(content, "\n"))
+		}
 		return 2 + bytes.Count(m.workspaceFile.Data, []byte{'\n'})
 	}
 	if len(m.workspaceDiffRows) == 0 {
@@ -1025,6 +1039,17 @@ func isMarkdownPath(path string) bool {
 }
 
 func renderWorkspaceMarkdown(data []byte, width, height, offset int) string {
+	content := renderWorkspaceMarkdownContent(data, width)
+	lines := strings.Split(content, "\n")
+	offset = min(max(0, offset), max(0, len(lines)-1))
+	lines = lines[offset:]
+	if height > 1 {
+		lines = lines[:min(len(lines), height-1)]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func renderWorkspaceMarkdownContent(data []byte, width int) string {
 	content := sanitizeWorkspaceText(strings.ReplaceAll(string(data), "\r\n", "\n"))
 	renderer, err := glamour.NewTermRenderer(
 		glamour.WithStandardStyle("dark"),
@@ -1036,13 +1061,7 @@ func renderWorkspaceMarkdown(data []byte, width, height, offset int) string {
 			content = strings.TrimSuffix(rendered, "\n")
 		}
 	}
-	lines := strings.Split(content, "\n")
-	offset = min(max(0, offset), max(0, len(lines)-1))
-	lines = lines[offset:]
-	if height > 1 {
-		lines = lines[:min(len(lines), height-1)]
-	}
-	return strings.Join(lines, "\n")
+	return content
 }
 
 func cropWorkspaceRows(rows []string, height, offset int) string {

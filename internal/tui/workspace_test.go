@@ -747,6 +747,111 @@ func TestWorkspacePreviewCanScrollWithoutChangingSelection(t *testing.T) {
 	}
 }
 
+func TestWrappedMarkdownPreviewCanScroll(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
+	m.width, m.height = 48, 12
+	m.workspaceEntries = []worktree.Entry{{Path: "README.md", Name: "README.md"}}
+	m.workspaceFile = worktree.File{
+		Path: "README.md",
+		Data: []byte(strings.Repeat("wrapped markdown words need several visual rows ", 12)),
+	}
+
+	if count := m.workspacePreviewLineCount(); count <= m.workspaceListHeight() {
+		t.Fatalf("rendered Markdown line count = %d, viewport height = %d", count, m.workspaceListHeight())
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = updated.(Model)
+	if m.workspacePreviewOffset == 0 || m.workspaceCursor != 0 {
+		t.Fatalf("Markdown preview scroll: offset=%d cursor=%d", m.workspacePreviewOffset, m.workspaceCursor)
+	}
+}
+
+func TestWorkspacePreviewScrollsWithRightPaneMouseWheel(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
+	m.width, m.height = 100, 12
+	m.workspaceEntries = []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}
+	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("line\n", 20))}
+	leftWidth, _ := m.workspacePaneWidths()
+
+	updated, _ := m.Update(tea.MouseMsg{
+		X: leftWidth + 4, Y: 6, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress,
+	})
+	m = updated.(Model)
+	if m.workspacePreviewOffset != 3 || m.workspaceCursor != 0 {
+		t.Fatalf("right-pane wheel: offset=%d cursor=%d", m.workspacePreviewOffset, m.workspaceCursor)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{
+		X: leftWidth + 4, Y: 6, Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress,
+	})
+	m = updated.(Model)
+	if m.workspacePreviewOffset != 0 || m.workspaceCursor != 0 {
+		t.Fatalf("right-pane wheel up: offset=%d cursor=%d", m.workspacePreviewOffset, m.workspaceCursor)
+	}
+}
+
+func TestWorkspaceFileRefreshPreservesAndClampsPreviewOffset(t *testing.T) {
+	workspace := &fakeWorkspace{entries: []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+	m.width, m.height = 100, 12
+	m.workspaceEntries = workspace.entries
+	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("old\n", 30))}
+	m.workspacePreviewOffset = 8
+	m.workspaceLoading = true
+	m.workspaceEntryPending = 1
+
+	updated, load := m.Update(workspaceResultMsg{
+		request: m.workspaceEntryRequest, op: "entries", entries: workspace.entries,
+	})
+	m = updated.(Model)
+	if load == nil || m.workspacePreviewOffset != 8 {
+		t.Fatalf("same-file entries refresh: load=%v offset=%d", load != nil, m.workspacePreviewOffset)
+	}
+	request := m.workspacePreviewRequest
+	updated, _ = m.Update(workspaceResultMsg{
+		request: request, op: "file", file: worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("new\n", 30))},
+	})
+	m = updated.(Model)
+	if m.workspacePreviewOffset != 8 {
+		t.Fatalf("same-file content refresh offset = %d, want 8", m.workspacePreviewOffset)
+	}
+	m.workspacePreviewRequest++
+	m.workspacePreviewLoading = true
+	updated, _ = m.Update(workspaceResultMsg{
+		request: m.workspacePreviewRequest, op: "file", file: worktree.File{Path: "long.txt", Data: []byte("one\ntwo")},
+	})
+	m = updated.(Model)
+	if m.workspacePreviewOffset != 0 {
+		t.Fatalf("shortened file offset = %d, want clamped to 0", m.workspacePreviewOffset)
+	}
+}
+
+func TestWorkspaceFileSelectionChangeResetsPreviewOffset(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
+	m.workspaceEntries = []worktree.Entry{
+		{Path: "first.txt", Name: "first.txt"},
+		{Path: "second.txt", Name: "second.txt"},
+	}
+	m.workspaceFile = worktree.File{Path: "first.txt", Data: []byte(strings.Repeat("line\n", 20))}
+	m.workspacePreviewOffset = 7
+	m.workspaceCursor = 1
+
+	updated, load := m.loadSelectedWorkspaceItem()
+	if load == nil || updated.workspacePreviewOffset != 0 {
+		t.Fatalf("new selection: load=%v offset=%d", load != nil, updated.workspacePreviewOffset)
+	}
+	updated.workspacePreviewOffset = 5
+	updated.workspaceEntries[1].IsDir = true
+	updated, load = updated.loadSelectedWorkspaceItem()
+	if load != nil || updated.workspacePreviewOffset != 0 || updated.workspaceFile.Path != "" {
+		t.Fatalf("directory selection: load=%v offset=%d file=%q", load != nil, updated.workspacePreviewOffset, updated.workspaceFile.Path)
+	}
+}
+
 func TestWorkspacePaneWidthsStayWithinTerminal(t *testing.T) {
 	for _, width := range []int{12, 30, 63, 120} {
 		left, right := workspacePaneWidths(width)
