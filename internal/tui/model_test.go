@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
 type fakeProvider struct{}
@@ -175,14 +177,48 @@ func TestUpdateButtonAppearsAndStartsInstaller(t *testing.T) {
 	}
 }
 
-func TestInstallerCompletionQuits(t *testing.T) {
+func TestHeaderUsesProductNameAndVersion(t *testing.T) {
 	m := New(fakeProvider{}, 0)
-	_, cmd := m.Update(installFinishedMsg{})
+	m.currentVersion = "v1.2.3"
+	m.width = 120
+	header := ansi.Strip(m.headerView("  GitHub · owner/repo"))
+	if !strings.Contains(header, "Zzam Tiger v1.2.3  GitHub · owner/repo") {
+		t.Fatalf("header = %q", header)
+	}
+}
+
+func TestInstallerCompletionRestartsAndClosesWatcher(t *testing.T) {
+	watcher := &fakeWorkspaceWatcher{updates: make(chan worktree.WatchUpdate)}
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.watcher = watcher
+	m.restartUpdate = func() *exec.Cmd { return exec.Command("sh", "-c", "true") }
+	updated, cmd := m.Update(installFinishedMsg{})
+	m = updated.(Model)
 	if cmd == nil {
-		t.Fatal("installer completion did not return a quit command")
+		t.Fatal("installer completion did not return a restart command")
+	}
+	if !watcher.closed || m.status != "update installed; restarting…" {
+		t.Fatalf("restart state: watcher closed=%t status=%q", watcher.closed, m.status)
+	}
+}
+
+func TestInstallerFailureStaysOpenAndCanRetry(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	updated, cmd := m.Update(installFinishedMsg{err: context.DeadlineExceeded})
+	m = updated.(Model)
+	if cmd != nil || !m.updateAvailable || m.err == nil || m.status != "update failed" {
+		t.Fatalf("failed install state: cmd=%v available=%t err=%v status=%q", cmd != nil, m.updateAvailable, m.err, m.status)
+	}
+}
+
+func TestRestartCompletionQuitsOriginalProcess(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	_, cmd := m.Update(restartFinishedMsg{})
+	if cmd == nil {
+		t.Fatal("restart completion did not return a quit command")
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
-		t.Fatalf("installer completion command returned %T, want tea.QuitMsg", cmd())
+		t.Fatalf("restart completion command returned %T, want tea.QuitMsg", cmd())
 	}
 }
 
@@ -1441,5 +1477,44 @@ func TestCommentAndDiffActionsRequireMatchingDetail(t *testing.T) {
 	m = updated.(Model)
 	if cmd != nil || m.screen != diffScreen {
 		t.Fatal("inline review opened while detail was loading")
+	}
+}
+
+func TestUnavailableCapabilitiesRenderWithoutStartingRemoteWork(t *testing.T) {
+	m := New(nil, time.Second).
+		WithLocalUnavailable(errors.New("Git repository required")).
+		WithRemoteUnavailable(errors.New("GitHub CLI (gh) is not installed; run gh auth login"))
+	if cmd := m.Init(); cmd != nil {
+		t.Fatal("unavailable capabilities started background polling or loading")
+	}
+	m.width, m.height = 100, 20
+	view := m.View()
+	for _, want := range []string{"remote unavailable", "GitHub CLI (gh) is not installed", "Git repository required"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("unavailable view does not contain %q:\n%s", want, view)
+		}
+	}
+	for _, input := range []tea.KeyMsg{{Type: tea.KeyRight}, {Type: tea.KeyRunes, Runes: []rune{'r'}}} {
+		updated, cmd := m.Update(input)
+		m = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("key %q invoked unavailable backend", input.String())
+		}
+	}
+}
+
+func TestLocalGraphLoadsWithoutRemoteProvider(t *testing.T) {
+	workspace := &fakeWorkspace{history: []worktree.Commit{{SHA: "abcdef012345", Subject: "local commit"}}}
+	m := newWithWorkspace(nil, time.Second, workspace).WithRemoteUnavailable(errors.New("gh missing"))
+	m.active = 2
+	m.loadingList = false
+	updated, cmd := m.startListLoad()
+	m = updated
+	if cmd == nil {
+		t.Fatal("local graph was disabled with the remote provider")
+	}
+	result := cmd().(listResultMsg)
+	if result.err != nil || len(result.items) != 1 || result.items[0].Title != "local commit" {
+		t.Fatalf("local graph result = %#v", result)
 	}
 }

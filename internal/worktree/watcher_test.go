@@ -45,6 +45,31 @@ func TestWatcherDetectsWorktreeChangesAndNewDirectories(t *testing.T) {
 	waitForWatchUpdate(t, w)
 }
 
+func TestWatcherDetectsChangesOutsideGitRepository(t *testing.T) {
+	root := t.TempDir()
+	w, err := NewWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	path := filepath.Join(root, "plain.txt")
+	if err := os.WriteFile(path, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatchPath(t, w, path)
+}
+
+func TestPollingWatcherDetectsChangesWhenNativeWatchesAreUnavailable(t *testing.T) {
+	root := t.TempDir()
+	w := newPollingWatcher(root)
+	defer w.Close()
+	path := filepath.Join(root, "polled.txt")
+	if err := os.WriteFile(path, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatchPath(t, w, root)
+}
+
 func TestWatcherDetectsGitIndexHeadAndRefs(t *testing.T) {
 	root := initWatcherRepo(t)
 	w, err := NewWatcher(root)

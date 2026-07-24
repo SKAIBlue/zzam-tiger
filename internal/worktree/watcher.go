@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -21,6 +22,7 @@ type Watcher struct {
 	fs      *fsnotify.Watcher
 	root    string
 	gitDirs []string
+	polling bool
 	updates chan WatchUpdate
 	done    chan struct{}
 	once    sync.Once
@@ -33,9 +35,14 @@ func NewWatcher(root string) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
+	if info, err := os.Stat(root); err != nil {
+		return nil, err
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("watch root %q is not a directory", root)
+	}
 	fs, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, err
+		return newPollingWatcher(root), nil
 	}
 	w := &Watcher{fs: fs, root: filepath.Clean(root), updates: make(chan WatchUpdate, 32), done: make(chan struct{})}
 	gitDirs, err := resolveGitDirs(root)
@@ -46,22 +53,36 @@ func NewWatcher(root string) (*Watcher, error) {
 	w.gitDirs = gitDirs
 	if err := w.addTree(root, true); err != nil {
 		fs.Close()
-		return nil, err
+		return newPollingWatcher(root), nil
 	}
 	for _, dir := range gitDirs {
 		if err := w.addGitWatches(dir); err != nil {
 			fs.Close()
-			return nil, err
+			return newPollingWatcher(root), nil
 		}
 	}
 	go w.run()
 	return w, nil
 }
 
+// newPollingWatcher is a portable fallback for directory trees that exceed
+// the operating system's per-directory watch limit.
+func newPollingWatcher(root string) *Watcher {
+	w := &Watcher{root: filepath.Clean(root), polling: true, updates: make(chan WatchUpdate, 32), done: make(chan struct{})}
+	initial, initialErr := snapshotTree(w.root)
+	go w.poll(initial, initialErr)
+	return w
+}
+
 func resolveGitDirs(root string) ([]string, error) {
 	dotGit := filepath.Join(root, ".git")
 	info, err := os.Stat(dotGit)
 	if err != nil {
+		if os.IsNotExist(err) {
+			// A plain directory is still a valid Files-only workspace. It has no
+			// Git metadata to watch, but its filesystem tree remains watchable.
+			return nil, nil
+		}
 		return nil, fmt.Errorf("resolve Git directory: %w", err)
 	}
 	gitDir := dotGit
@@ -132,9 +153,73 @@ func (w *Watcher) Close() error {
 	var err error
 	w.once.Do(func() {
 		close(w.done)
-		err = w.fs.Close()
+		if w.fs != nil {
+			err = w.fs.Close()
+		}
 	})
 	return err
+}
+
+type fileStamp struct {
+	modTime time.Time
+	size    int64
+	mode    os.FileMode
+}
+
+func (w *Watcher) poll(previous map[string]fileStamp, initialErr error) {
+	defer close(w.updates)
+	if initialErr != nil {
+		w.send(WatchUpdate{Err: initialErr})
+	}
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.done:
+			return
+		case <-ticker.C:
+			current, err := snapshotTree(w.root)
+			if err != nil {
+				w.send(WatchUpdate{Err: err})
+				continue
+			}
+			if !sameSnapshot(previous, current) {
+				previous = current
+				w.send(WatchUpdate{Path: w.root})
+			}
+		}
+	}
+}
+
+func snapshotTree(root string) (map[string]fileStamp, error) {
+	snapshot := make(map[string]fileStamp)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path != root && entry.IsDir() && (entry.Name() == ".git" || entry.Type()&os.ModeSymlink != 0) {
+			return filepath.SkipDir
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		snapshot[path] = fileStamp{modTime: info.ModTime(), size: info.Size(), mode: info.Mode()}
+		return nil
+	})
+	return snapshot, err
+}
+
+func sameSnapshot(left, right map[string]fileStamp) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for path, stamp := range left {
+		if right[path] != stamp {
+			return false
+		}
+	}
+	return true
 }
 
 func (w *Watcher) run() {

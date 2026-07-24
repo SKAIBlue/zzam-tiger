@@ -270,6 +270,39 @@ func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
 	}
 }
 
+func TestBranchesListsLocalAndRemoteRefs(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "main.txt", []byte("main"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	git(t, repo, "branch", "topic")
+	git(t, repo, "update-ref", "refs/remotes/origin/topic", "HEAD")
+	branches, err := New(repo, provider.ExecRunner{}).Branches(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main, topic, remoteTopic Branch
+	for _, branch := range branches {
+		switch branch.Name {
+		case "master", "main":
+			if !branch.Remote {
+				main = branch
+			}
+		case "topic":
+			if !branch.Remote {
+				topic = branch
+			}
+		case "origin/topic":
+			if branch.Remote {
+				remoteTopic = branch
+			}
+		}
+	}
+	if main.Name == "" || !main.Head || topic.Name == "" || remoteTopic.Name == "" {
+		t.Fatalf("branches = %#v", branches)
+	}
+}
+
 func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	when := "2026-07-23T10:20:30+09:00"
 	logOutput := []byte("child\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00" + when + "\x00")
@@ -506,6 +539,41 @@ func TestDiffReportsUnmergedConflict(t *testing.T) {
 	}
 	if _, err := client.Diff(context.Background(), "conflict.txt", false); err == nil || !strings.Contains(err.Error(), "unresolved merge conflicts") {
 		t.Fatalf("conflict Diff error = %v", err)
+	}
+}
+
+func TestOpenRequiresGitWorkingTree(t *testing.T) {
+	if _, err := Open(t.TempDir(), provider.ExecRunner{}); err == nil || !strings.Contains(err.Error(), "Git repository required") {
+		t.Fatalf("Open outside Git error = %v", err)
+	}
+	repo := newRepo(t)
+	nested := filepath.Join(repo, "nested")
+	if err := os.Mkdir(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	client, err := Open(nested, provider.ExecRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Root() != wantRoot {
+		t.Fatalf("Open root = %q, want %q", client.Root(), wantRoot)
+	}
+}
+
+func TestNewFilesystemListsOutsideGit(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "plain.txt", []byte("content"))
+	client := NewFilesystem(dir)
+	entries, err := client.Entries(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Path != "plain.txt" {
+		t.Fatalf("filesystem entries = %#v", entries)
 	}
 }
 

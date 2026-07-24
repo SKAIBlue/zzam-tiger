@@ -18,8 +18,39 @@ import (
 
 // Client reads and mutates one local Git working tree.
 type Client struct {
-	root   string
-	runner provider.Runner
+	root       string
+	runner     provider.Runner
+	filesystem bool
+}
+
+// NewFilesystem creates a read-only filesystem browser rooted at root.
+// Unlike New, it does not require Git and does not apply .gitignore rules.
+func NewFilesystem(root string) *Client {
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	return &Client{root: filepath.Clean(root), filesystem: true}
+}
+
+// Open creates a client only when root belongs to a readable Git working tree.
+func Open(root string, runner provider.Runner) (*Client, error) {
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	topLevel, err := runner.Run(ctx, "git", "-C", root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return nil, fmt.Errorf("Git repository required; run zt inside a Git working tree: %w", err)
+	}
+	resolvedRoot := strings.TrimSpace(string(topLevel))
+	if resolvedRoot == "" {
+		return nil, fmt.Errorf("Git repository required; git returned an empty working-tree root")
+	}
+	return New(resolvedRoot, runner), nil
 }
 
 // Root returns the normalized Git top-level managed by this client.
@@ -84,6 +115,16 @@ type Commit struct {
 	Refs       []Ref
 }
 
+// Branch is a local or remote ref available from the Git repository.
+type Branch struct {
+	Name      string
+	SHA       string
+	Author    string
+	UpdatedAt time.Time
+	Head      bool
+	Remote    bool
+}
+
 // New creates a client rooted at root. The root may be relative.
 func New(root string, runner provider.Runner) *Client {
 	if abs, err := filepath.Abs(root); err == nil {
@@ -137,9 +178,13 @@ func (c *Client) Entries(ctx context.Context, path string) ([]Entry, error) {
 		paths = append(paths, entryPath)
 	}
 
-	ignored, err := c.ignoredEntries(ctx, paths)
-	if err != nil {
-		return nil, err
+	ignored := make(map[string]bool)
+	if !c.filesystem {
+		var err error
+		ignored, err = c.ignoredEntries(ctx, paths)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -264,6 +309,43 @@ func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
 		commits[i].Refs = refs[commits[i].SHA]
 	}
 	return commits, nil
+}
+
+// Branches lists local and remote branches without requiring a hosting CLI.
+func (c *Client) Branches(ctx context.Context) ([]Branch, error) {
+	out, err := c.git(ctx, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(authorname)%00%(authordate:iso-strict)%00%(HEAD)%00", "refs/heads", "refs/remotes")
+	if err != nil {
+		return nil, err
+	}
+	// for-each-ref appends a newline after every formatted record. Remove it
+	// after the trailing NUL delimiter so record fields remain aligned.
+	fields := splitNUL(bytes.ReplaceAll(out, []byte{0, '\n'}, []byte{0}))
+	if len(fields)%5 != 0 {
+		return nil, fmt.Errorf("parse branch refs: expected fields in groups of 5, got %d", len(fields))
+	}
+	branches := make([]Branch, 0, len(fields)/5)
+	for index := 0; index < len(fields); index += 5 {
+		ref := fields[index]
+		branch := Branch{SHA: fields[index+1], Author: fields[index+2], Head: fields[index+4] == "*"}
+		switch {
+		case strings.HasPrefix(ref, "refs/heads/"):
+			branch.Name = strings.TrimPrefix(ref, "refs/heads/")
+		case strings.HasPrefix(ref, "refs/remotes/"):
+			branch.Name = strings.TrimPrefix(ref, "refs/remotes/")
+			branch.Remote = true
+		default:
+			continue
+		}
+		if fields[index+3] != "" {
+			parsed, err := time.Parse(time.RFC3339, fields[index+3])
+			if err != nil {
+				return nil, fmt.Errorf("parse branch date %q: %w", fields[index+3], err)
+			}
+			branch.UpdatedAt = parsed
+		}
+		branches = append(branches, branch)
+	}
+	return branches, nil
 }
 
 // Stage adds a path to the index.

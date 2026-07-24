@@ -73,7 +73,12 @@ Open a cloned GitHub or GitLab repository and run:
 zt
 ```
 
-Zzam Tiger automatically detects the hosting provider from `origin`. Local Commit and Files tabs update from filesystem events; `--refresh` controls only remote-provider polling. Run `zt --help` to see provider, repository, and refresh overrides.
+Zzam Tiger automatically detects the hosting provider from `origin`. It also starts in degraded environments:
+
+- In a Git working tree without `gh` or `glab`, Commit, Files, Graph, and Branches remain available through Git. PR/MR, Issues, Milestones, and CI tabs are hidden until the provider CLI is installed and authenticated.
+- Outside a Git working tree, zt opens a Files-only filesystem browser with no provider dependency.
+
+Local tabs update from filesystem events; `--refresh` controls only remote-provider polling. Run `zt --help` to see provider, repository, and refresh overrides.
 
 ### Recommended Setup: Split Your Terminal
 

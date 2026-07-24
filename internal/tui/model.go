@@ -60,6 +60,11 @@ var workspaceKinds = []provider.Kind{
 	provider.CIRuns,
 }
 
+var localWorkspaceKinds = []provider.Kind{
+	provider.Commits,
+	provider.Branches,
+}
+
 type listResultMsg struct {
 	request uint64
 	kind    provider.Kind
@@ -99,14 +104,19 @@ type updateResultMsg struct {
 	available bool
 }
 
-type installFinishedMsg struct{}
+type installFinishedMsg struct{ err error }
+type restartFinishedMsg struct{ err error }
 
 type updateChecker func(context.Context, string) (string, bool, error)
 type installCommand func() *exec.Cmd
+type restartCommand func() *exec.Cmd
 
 type Model struct {
 	backend   provider.Provider
+	remoteErr error
+	localErr  error
 	workspace workspaceClient
+	filesOnly bool
 	watcher   workspaceWatcher
 	refresh   time.Duration
 
@@ -184,6 +194,7 @@ type Model struct {
 	updateAvailable bool
 	checkUpdate     updateChecker
 	installUpdate   installCommand
+	restartUpdate   restartCommand
 }
 
 func New(backend provider.Provider, refresh time.Duration) Model {
@@ -226,10 +237,37 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	return model
 }
 
+// WithRemoteUnavailable keeps the TUI usable while disabling remote operations.
+func (m Model) WithRemoteUnavailable(err error) Model {
+	m.remoteErr = err
+	m.loadingList = false
+	return m
+}
+
+// WithLocalUnavailable records why local Git tabs are not present.
+func (m Model) WithLocalUnavailable(err error) Model {
+	m.localErr = err
+	return m
+}
+
 // NewWithWorktree enables the local Files and Commit tabs before the remote
 // provider tabs. New remains available for embedders that only need remote UI.
 func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace *worktree.Client) Model {
 	model := newWithWorkspace(backend, refresh, workspace)
+	watcher, err := worktree.NewWatcher(workspace.Root())
+	if err != nil {
+		model.workspaceWatcherErr = fmt.Errorf("filesystem watcher unavailable (manual refresh remains available): %w", err)
+		return model
+	}
+	model.watcher = watcher
+	return model
+}
+
+// NewFilesOnly opens a filesystem browser without requiring a Git repository.
+func NewFilesOnly(workspace *worktree.Client) Model {
+	model := newWithWorkspace(nil, 0, workspace)
+	model.filesOnly = true
+	model.active = workspaceFilesTab
 	watcher, err := worktree.NewWatcher(workspace.Root())
 	if err != nil {
 		model.workspaceWatcherErr = fmt.Errorf("filesystem watcher unavailable (manual refresh remains available): %w", err)
@@ -244,6 +282,7 @@ func (m Model) WithUpdates(current string, checker func(context.Context, string)
 	m.currentVersion = current
 	m.checkUpdate = checker
 	m.installUpdate = installer
+	m.restartUpdate = func() *exec.Cmd { return exec.Command("zt") }
 	return m
 }
 
@@ -276,21 +315,24 @@ func (m Model) Init() tea.Cmd {
 	var initial tea.Cmd
 	if m.localTab() {
 		request := m.workspaceRequest
-		if m.active == workspaceFilesTab {
+		if m.workspaceFilesActive() {
 			request = m.workspaceEntryRequest
 		}
 		initial = m.fetchWorkspaceCmd(request)
-	} else {
+	} else if m.remoteErr == nil {
 		initial = m.fetchListCmd(m.listRequest, m.kind(), m.filter())
 	}
-	commands := []tea.Cmd{initial}
+	commands := []tea.Cmd{}
+	if initial != nil {
+		commands = append(commands, initial)
+	}
 	if m.watcher != nil {
 		commands = append(commands, waitWorkspaceWatchCmd(m.watcher))
 	}
 	if m.checkUpdate != nil {
 		commands = append(commands, m.checkUpdateCmd())
 	}
-	if m.refresh > 0 {
+	if m.refresh > 0 && m.remoteErr == nil {
 		commands = append(commands, tickCmd(m.refresh))
 	}
 	return tea.Batch(commands...)
@@ -312,8 +354,8 @@ func (m Model) kind() provider.Kind {
 	index := m.active
 	activeKinds := kinds
 	if m.workspace != nil {
-		index -= 2
-		activeKinds = workspaceKinds
+		index -= m.localTabCount()
+		activeKinds = m.workspaceKinds()
 	}
 	if index < 0 || index >= len(activeKinds) {
 		return provider.PullRequests
@@ -321,16 +363,50 @@ func (m Model) kind() provider.Kind {
 	return activeKinds[index]
 }
 
-func (m Model) localTab() bool { return m.workspace != nil && m.active < 2 }
+func (m Model) workspaceKinds() []provider.Kind {
+	if m.remoteErr != nil || m.backend == nil {
+		return localWorkspaceKinds
+	}
+	return workspaceKinds
+}
+
+func (m Model) localGitList(kind provider.Kind) bool {
+	return m.workspace != nil && (kind == provider.Commits || kind == provider.Branches) && m.remoteErr != nil
+}
+
+func (m Model) localTab() bool {
+	return m.workspace != nil && (m.active < m.localTabCount() || m.filesOnly)
+}
+
+func (m Model) localTabCount() int {
+	if m.filesOnly {
+		return 1
+	}
+	return 2
+}
+
+func (m Model) workspaceFilesActive() bool {
+	return m.active == workspaceFilesTab || m.filesOnly
+}
+
+func (m Model) workspaceCommitActive() bool {
+	return !m.filesOnly && m.active == workspaceCommitTab
+}
 
 func (m Model) tabCount() int {
 	if m.workspace != nil {
-		return len(kinds) + 2
+		if m.filesOnly {
+			return 1
+		}
+		return len(m.workspaceKinds()) + m.localTabCount()
 	}
 	return len(kinds)
 }
 
 func (m Model) filter() provider.Filter {
+	if m.remoteErr != nil {
+		return provider.Filter{}
+	}
 	filters := m.backend.Filters(m.kind())
 	index := m.filterIndex[m.kind()]
 	if index < 0 || index >= len(filters) {
@@ -362,7 +438,23 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if workspace != nil && kind == provider.Commits {
+		if m.localGitList(kind) || workspace != nil && kind == provider.Commits {
+			if kind == provider.Branches {
+				branches, err := workspace.Branches(ctx)
+				items := make([]provider.Item, 0, len(branches))
+				for _, branch := range branches {
+					state := "local"
+					if branch.Remote {
+						state = "remote"
+					}
+					meta := shortCommitSHA(branch.SHA)
+					if branch.Head {
+						meta = "HEAD · " + meta
+					}
+					items = append(items, provider.Item{ID: branch.Name, Title: branch.Name, State: state, Author: branch.Author, UpdatedAt: branch.UpdatedAt, Meta: meta})
+				}
+				return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
+			}
 			commits, err := workspace.History(ctx, 200)
 			items := make([]provider.Item, 0, len(commits))
 			for _, commit := range commits {
@@ -407,6 +499,10 @@ func (m Model) actionCmd(name string, run func(context.Context) error) tea.Cmd {
 }
 
 func (m Model) startListLoad() (Model, tea.Cmd) {
+	if m.remoteErr != nil && !(m.workspace != nil && (m.kind() == provider.Commits || m.kind() == provider.Branches)) {
+		m.loadingList = false
+		return m, nil
+	}
 	if m.loadingList {
 		return m, nil
 	}
@@ -417,6 +513,9 @@ func (m Model) startListLoad() (Model, tea.Cmd) {
 }
 
 func (m Model) startDetailLoad() (Model, tea.Cmd) {
+	if m.remoteErr != nil {
+		return m, nil
+	}
 	if m.loadingDetail || m.selected.ID == "" {
 		return m, nil
 	}
@@ -437,7 +536,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.detail.Item.ID != "" {
 			m.setDetailContent()
 		}
-		if m.localTab() && !m.workspacePreviewLoading && m.active == workspaceFilesTab && m.workspaceFile.Image {
+		if m.localTab() && !m.workspacePreviewLoading && m.workspaceFilesActive() && m.workspaceFile.Image {
 			width, height := m.workspaceImageDimensions()
 			if width != m.workspaceImageWidth || height != m.workspaceImageHeight {
 				m.workspacePreviewRequest++
@@ -445,7 +544,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, m.workspaceFile, width, height)
 			}
 		}
-		if m.localTab() && !m.workspacePreviewLoading && m.active == workspaceCommitTab && m.workspaceDiff.Path != "" {
+		if m.localTab() && !m.workspacePreviewLoading && m.workspaceCommitActive() && m.workspaceDiff.Path != "" {
 			_, width := m.workspacePaneWidths()
 			if width != m.workspaceDiffWidth {
 				m.workspacePreviewRequest++
@@ -466,6 +565,23 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case installFinishedMsg:
+		if msg.err != nil {
+			m.updateAvailable = true
+			m.status = "update failed"
+			m.err = fmt.Errorf("install update: %w", msg.err)
+			return m, nil
+		}
+		m.status = "update installed; restarting…"
+		m.err = nil
+		_ = m.Close()
+		if m.restartUpdate == nil {
+			return m, tea.Quit
+		}
+		return m, tea.ExecProcess(m.restartUpdate(), func(err error) tea.Msg {
+			return restartFinishedMsg{err: err}
+		})
+
+	case restartFinishedMsg:
 		return m, tea.Quit
 
 	case workspaceWatchMsg:
@@ -568,7 +684,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		commands := []tea.Cmd{}
-		if m.refresh > 0 {
+		if m.refresh > 0 && m.remoteErr == nil {
 			commands = append(commands, tickCmd(m.refresh))
 		}
 		var refreshCmd tea.Cmd
@@ -1073,6 +1189,9 @@ func splitLabels(value string) []string {
 }
 
 func (m Model) changeFilter(delta int) (tea.Model, tea.Cmd) {
+	if m.remoteErr != nil {
+		return m, nil
+	}
 	filters := m.backend.Filters(m.kind())
 	if len(filters) <= 1 {
 		return m, nil
@@ -1089,6 +1208,10 @@ func (m Model) openSelected() (tea.Model, tea.Cmd) {
 	items := m.items[m.kind()]
 	index := m.cursor[m.kind()]
 	if index < 0 || index >= len(items) {
+		return m, nil
+	}
+	if m.remoteErr != nil {
+		m.status = "details require an available remote provider"
 		return m, nil
 	}
 	m.selected = items[index]
@@ -1565,7 +1688,7 @@ func reviewActionBounds(meta, action string, baseX int) (int, int) {
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.updateAvailable && m.installUpdate != nil && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 0 && msg.X >= m.updateButtonStart() {
 		m.updateAvailable = false
-		return m, tea.ExecProcess(m.installUpdate(), func(error) tea.Msg { return installFinishedMsg{} })
+		return m, tea.ExecProcess(m.installUpdate(), func(err error) tea.Msg { return installFinishedMsg{err: err} })
 	}
 	if m.workspaceDividerDragging {
 		switch msg.Action {
@@ -1601,7 +1724,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.workspaceDividerDragging = true
 			return m, nil
 		}
-		if m.active == workspaceCommitTab && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
+		if m.workspaceCommitActive() && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
 			buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
 			buttonStart := max(0, m.width-buttonWidth-1)
 			if msg.X >= buttonStart {
@@ -1630,20 +1753,20 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		row := msg.Y - 5
 		index := m.workspaceOffset + row
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			index = m.workspaceChangeIndexAtRow(row)
 		}
 		length := len(m.filteredWorkspaceEntries())
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			length = len(m.filteredWorkspaceChanges())
 		}
 		if index >= 0 && index < length {
 			m.workspaceCursor = index
 			m.ensureWorkspaceCursorVisible()
-			if m.active == workspaceFilesTab && m.filteredWorkspaceEntries()[index].IsDir {
+			if m.workspaceFilesActive() && m.filteredWorkspaceEntries()[index].IsDir {
 				return m.toggleWorkspaceDirectory()
 			}
-			if m.active == workspaceCommitTab && m.filteredWorkspaceChanges()[index].isDir {
+			if m.workspaceCommitActive() && m.filteredWorkspaceChanges()[index].isDir {
 				return m.toggleWorkspaceChangeDirectory(), nil
 			}
 			return m.loadSelectedWorkspaceItem()
@@ -1892,10 +2015,16 @@ func (m Model) tabLabels() []string {
 	activeKinds := kinds
 	if m.workspace != nil {
 		labels = append(labels, "Commit", "Files")
-		activeKinds = workspaceKinds
+		if m.filesOnly {
+			return []string{"Files"}
+		}
+		activeKinds = m.workspaceKinds()
 	}
 	for _, kind := range activeKinds {
-		name := m.backend.TabName(kind)
+		name := kind.String()
+		if m.backend != nil {
+			name = m.backend.TabName(kind)
+		}
 		if kind == provider.Commits {
 			name = "Graph"
 		}
@@ -1905,6 +2034,9 @@ func (m Model) tabLabels() []string {
 }
 
 func (m Model) filterAt(x int) int {
+	if m.remoteErr != nil {
+		return -1
+	}
 	position := 1
 	for index, filter := range m.backend.Filters(m.kind()) {
 		label := " " + filter.Label + " "

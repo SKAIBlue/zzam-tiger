@@ -3,9 +3,13 @@ package tui
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +35,7 @@ type fakeWorkspace struct {
 	unstageAll   int
 	commits      []string
 	history      []worktree.Commit
+	branches     []worktree.Branch
 }
 
 type fakeWorkspaceWatcher struct {
@@ -155,6 +160,9 @@ func (w *fakeWorkspace) Diff(_ context.Context, path string, _ bool) (worktree.D
 func (w *fakeWorkspace) History(context.Context, int) ([]worktree.Commit, error) {
 	return w.history, nil
 }
+func (w *fakeWorkspace) Branches(context.Context) ([]worktree.Branch, error) {
+	return w.branches, nil
+}
 
 func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
@@ -165,6 +173,105 @@ func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	}
 	if m.active != workspaceCommitTab || !m.localTab() {
 		t.Fatalf("initial tab = %d, local=%v; want Commit", m.active, m.localTab())
+	}
+}
+
+func TestUnavailableProviderShowsOnlyLocalGraphAndBranches(t *testing.T) {
+	m := newWithWorkspace(nil, time.Second, &fakeWorkspace{branches: []worktree.Branch{{Name: "main", SHA: "abcdef012345", Head: true}}}).WithRemoteUnavailable(errors.New("gh missing"))
+	want := []string{"Commit", "Files", "Graph", "Branches"}
+	if got := m.tabLabels(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unavailable-provider tabs = %#v, want %#v", got, want)
+	}
+	m.active = 3
+	m.loadingList = false
+	updated, cmd := m.startListLoad()
+	m = updated
+	if cmd == nil {
+		t.Fatal("local Branches did not start a load")
+	}
+	result := cmd().(listResultMsg)
+	if result.err != nil || len(result.items) != 1 || result.items[0].Title != "main" || result.items[0].Meta != "HEAD · abcdef0" {
+		t.Fatalf("local Branches result = %#v", result)
+	}
+	m.items[provider.Branches] = result.items
+	updatedModel, detail := m.openSelected()
+	m = updatedModel.(Model)
+	if detail != nil || m.screen != listScreen || !strings.Contains(m.status, "remote provider") {
+		t.Fatalf("local Branches detail state: screen=%v cmd=%v status=%q", m.screen, detail != nil, m.status)
+	}
+}
+
+func TestUnavailableProviderRendersLocalGraphInsteadOfRemoteError(t *testing.T) {
+	m := newWithWorkspace(nil, 0, &fakeWorkspace{}).WithRemoteUnavailable(errors.New("gh missing"))
+	m.active = 2 // Graph after Commit and Files.
+	m.width, m.height = 100, 20
+	m.items[provider.Commits] = []provider.Item{{ID: "abcdef0", Title: "local change", State: "commit", Meta: "abcdef0"}}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "local change") {
+		t.Fatalf("local Graph was hidden by remote error:\n%s", view)
+	}
+	if strings.Contains(view, "gh missing") {
+		t.Fatalf("remote error overlaid local Graph:\n%s", view)
+	}
+}
+
+func TestFilesOnlyModeHasNoGitOrRemoteTabs(t *testing.T) {
+	m := NewFilesOnly(worktree.NewFilesystem(t.TempDir()))
+	defer m.Close()
+	if !m.localTab() || !m.workspaceFilesActive() || m.workspaceCommitActive() {
+		t.Fatalf("files-only state: local=%t files=%t commit=%t", m.localTab(), m.workspaceFilesActive(), m.workspaceCommitActive())
+	}
+	if got := m.tabLabels(); !reflect.DeepEqual(got, []string{"Files"}) {
+		t.Fatalf("files-only tabs = %#v", got)
+	}
+	if m.tabCount() != 1 {
+		t.Fatalf("files-only tab count = %d, want 1", m.tabCount())
+	}
+}
+
+func TestFilesOnlyModeRefreshesAfterRealFilesystemWatchEvent(t *testing.T) {
+	root := t.TempDir()
+	m := NewFilesOnly(worktree.NewFilesystem(root))
+	defer m.Close()
+	m.workspaceLoading = false
+
+	watch := waitWorkspaceWatchCmd(m.watcher)
+	path := filepath.Join(root, "created.txt")
+	if err := os.WriteFile(path, []byte("created"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	message := watch()
+	update, cmd := m.Update(message)
+	m = update.(Model)
+	if cmd == nil || m.workspaceWatchGeneration == 0 {
+		t.Fatalf("watch event did not schedule reload: cmd=%v generation=%d", cmd != nil, m.workspaceWatchGeneration)
+	}
+	// The returned batch contains the next watch command and a debounced reload.
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("watch command = %#v, want watch and debounce batch", cmd())
+	}
+	debounce := batch[1]()
+	if _, ok := debounce.(workspaceDebounceMsg); !ok {
+		t.Fatalf("watch batch second command = %T, want workspaceDebounceMsg", debounce)
+	}
+	update, load := m.Update(debounce)
+	m = update.(Model)
+	if load == nil {
+		t.Fatal("debounce did not start Files-only reload")
+	}
+	result := load()
+	if batch, ok := result.(tea.BatchMsg); ok {
+		for _, candidate := range batch {
+			update, _ = m.Update(candidate())
+			m = update.(Model)
+		}
+	} else {
+		update, _ = m.Update(result)
+		m = update.(Model)
+	}
+	if len(m.workspaceEntries) != 1 || m.workspaceEntries[0].Path != "created.txt" {
+		t.Fatalf("Files-only watcher reload entries = %#v", m.workspaceEntries)
 	}
 }
 

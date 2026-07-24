@@ -20,6 +20,7 @@ var (
 	text                = lipgloss.Color("#E6E9EF")
 	border              = lipgloss.Color("#4B5263")
 	headerStyle         = lipgloss.NewStyle().Bold(true).Foreground(text)
+	versionStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#61AFEF"))
 	tabStyle            = lipgloss.NewStyle().Foreground(muted)
 	activeTab           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent)
 	filterStyle         = lipgloss.NewStyle().Foreground(muted)
@@ -44,7 +45,7 @@ var (
 
 func (m Model) View() string {
 	if m.width == 0 || m.height == 0 {
-		return "Starting zzam-tiger…"
+		return "Starting Zzam Tiger…"
 	}
 	if m.screen == diffScreen {
 		return m.diffView()
@@ -67,15 +68,27 @@ func (m Model) listView() string {
 		return m.workspaceView()
 	}
 	lines := make([]string, 0, m.height)
-	title := fmt.Sprintf(" zzam-tiger  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	title := "  remote unavailable"
+	if m.backend != nil {
+		title = fmt.Sprintf("  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	}
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
-	lines = append(lines, m.filtersView())
+	if m.remoteErr == nil {
+		lines = append(lines, m.filtersView())
+	} else {
+		lines = append(lines, metaStyle.Render(" Remote integration unavailable"))
+	}
+	if m.localErr != nil {
+		lines = append(lines, metaStyle.Render(" Local Git features unavailable: "+truncate(sanitizeWorkspaceLabel(m.localErr.Error()), max(1, m.width-34))))
+	}
 	lines = append(lines, "")
 
 	items := m.items[m.kind()]
-	if m.loadingList && len(items) == 0 {
+	if m.remoteErr != nil && !m.localGitList(m.kind()) {
+		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.remoteErr.Error()), max(1, m.width-2))))
+	} else if m.loadingList && len(items) == 0 {
 		lines = append(lines, metaStyle.Render("  Loading…"))
 	} else if m.err != nil && len(items) == 0 {
 		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.err.Error()), max(1, m.width-2))))
@@ -136,7 +149,11 @@ func (m Model) tabsView() string {
 
 func (m Model) workspaceView() string {
 	lines := make([]string, 0, m.height)
-	title := fmt.Sprintf(" zzam-tiger  local %s · remote %s/%s", sanitizeWorkspaceLabel(m.workspace.Root()), sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+	remote := "unavailable"
+	if m.backend != nil {
+		remote = sanitizeWorkspaceLabel(m.backend.Name()) + "/" + sanitizeWorkspaceLabel(m.backend.Repository())
+	}
+	title := fmt.Sprintf("  local %s · remote %s", sanitizeWorkspaceLabel(m.workspace.Root()), remote)
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
@@ -149,7 +166,7 @@ func (m Model) workspaceView() string {
 		filter = "Filter files: " + value
 	}
 	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
-	if m.active == workspaceCommitTab {
+	if m.workspaceCommitActive() {
 		lines = append(lines, m.workspaceCommitComposer())
 	} else {
 		lines = append(lines, "")
@@ -159,7 +176,7 @@ func (m Model) workspaceView() string {
 	leftWidth, rightWidth := m.workspacePaneWidths()
 	left := m.workspaceList(leftWidth, bodyHeight)
 	right := ""
-	if m.active == workspaceFilesTab {
+	if m.workspaceFilesActive() {
 		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightWidth, bodyHeight, m.workspacePreviewOffset)
 	} else {
 		if len(m.workspaceDiffRows) == 0 {
@@ -179,7 +196,7 @@ func (m Model) workspaceView() string {
 	}
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ select · Enter/→ expand · ← collapse · drag divider resize · PgUp/PgDn preview · / filter"
-	if m.active == workspaceCommitTab {
+	if m.workspaceCommitActive() {
 		help = " c message · Enter commit · drag divider resize · ↑/↓ select · Space toggle · s/u file or folder · S/U all · / filter"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
@@ -210,13 +227,23 @@ func (m Model) workspaceCommitComposer() string {
 }
 
 func (m Model) headerView(title string) string {
+	content := m.headerContent(title)
 	if !m.updateAvailable {
-		return headerStyle.Render(truncate(title, m.width))
+		return truncate(content, m.width)
 	}
 	button := updateButtonStyle.Render("Update")
 	titleWidth := max(0, m.width-lipgloss.Width(button)-1)
-	left := lipgloss.NewStyle().Width(titleWidth).Render(headerStyle.Render(truncate(title, titleWidth)))
+	left := lipgloss.NewStyle().Width(titleWidth).Render(truncate(content, titleWidth))
 	return truncate(left+" "+button, m.width)
+}
+
+func (m Model) headerContent(title string) string {
+	brand := headerStyle.Render(" Zzam Tiger")
+	version := ""
+	if m.currentVersion != "" {
+		version = versionStyle.Render(" " + m.currentVersion)
+	}
+	return brand + version + headerStyle.Render(title)
 }
 
 func (m Model) updateButtonStart() int {
@@ -224,15 +251,15 @@ func (m Model) updateButtonStart() int {
 }
 
 func (m Model) workspaceList(width, height int) string {
-	if m.workspaceLoading && len(m.workspaceEntries) == 0 && m.active == workspaceFilesTab ||
-		m.workspaceLoading && len(m.filteredWorkspaceChanges()) == 0 && m.active == workspaceCommitTab {
+	if m.workspaceLoading && len(m.workspaceEntries) == 0 && m.workspaceFilesActive() ||
+		m.workspaceLoading && len(m.filteredWorkspaceChanges()) == 0 && m.workspaceCommitActive() {
 		return metaStyle.Render(" Loading…")
 	}
 	if m.err != nil {
 		return errorStyle.Render(" " + truncate(sanitizeWorkspaceLabel(m.err.Error()), max(1, width-1)))
 	}
 	rows := make([]string, 0, height)
-	if m.active == workspaceFilesTab {
+	if m.workspaceFilesActive() {
 		entries := m.filteredWorkspaceEntries()
 		start := min(m.workspaceOffset, len(entries))
 		for index := start; index < len(entries) && len(rows) < height; index++ {

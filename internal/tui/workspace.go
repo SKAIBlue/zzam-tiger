@@ -40,6 +40,7 @@ type workspaceClient interface {
 	Commit(context.Context, string) error
 	Diff(context.Context, string, bool) (worktree.Diff, error)
 	History(context.Context, int) ([]worktree.Commit, error)
+	Branches(context.Context) ([]worktree.Branch, error)
 }
 
 type workspaceResultMsg struct {
@@ -87,11 +88,10 @@ func (c workspaceChange) displayPath() string {
 }
 
 func (m Model) fetchWorkspaceCmd(request uint64) tea.Cmd {
-	active := m.active
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		if active == workspaceFilesTab {
+		if m.workspaceFilesActive() {
 			entries, err := m.workspace.Entries(ctx, "")
 			return workspaceResultMsg{request: request, op: "entries", entries: entries, err: err}
 		}
@@ -171,7 +171,7 @@ func (m Model) startWorkspaceLoad() (Model, tea.Cmd) {
 	m.workspacePreviewRequest++
 	m.workspacePreviewLoading = false
 	m.err = nil
-	if m.active == workspaceFilesTab {
+	if m.workspaceFilesActive() {
 		m.workspaceEntryRequest++
 		dirs := []string{""}
 		for dir, expanded := range m.workspaceExpanded {
@@ -218,11 +218,11 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 	}
 	switch msg.op {
 	case "entries":
-		if m.active != workspaceFilesTab || msg.request != m.workspaceEntryRequest {
+		if !m.workspaceFilesActive() || msg.request != m.workspaceEntryRequest {
 			return m, nil
 		}
 	case "status":
-		if m.active != workspaceCommitTab || msg.request != m.workspaceRequest {
+		if !m.workspaceCommitActive() || msg.request != m.workspaceRequest {
 			return m, nil
 		}
 	case "file", "image", "diff", "diff-render":
@@ -277,7 +277,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		}
 		return m.finishWorkspaceLoad(nil)
 	case "status":
-		if m.active != workspaceCommitTab {
+		if !m.workspaceCommitActive() {
 			return m, nil
 		}
 		m.workspaceStatus = msg.status
@@ -296,7 +296,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		loaded, cmd := m.loadSelectedWorkspaceItem()
 		return loaded.finishWorkspaceLoad(cmd)
 	case "file":
-		if m.active != workspaceFilesTab {
+		if !m.workspaceFilesActive() {
 			return m, nil
 		}
 		m.workspaceFile = msg.file
@@ -312,7 +312,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 			return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, msg.file, width, height)
 		}
 	case "image":
-		if m.active != workspaceFilesTab || msg.file.Path != m.workspaceFile.Path {
+		if !m.workspaceFilesActive() || msg.file.Path != m.workspaceFile.Path {
 			return m, nil
 		}
 		m.workspaceImage = msg.image
@@ -320,7 +320,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		m.workspaceImageHeight = msg.height
 		m.workspacePreviewLoading = false
 	case "diff":
-		if m.active != workspaceCommitTab {
+		if !m.workspaceCommitActive() {
 			return m, nil
 		}
 		m.workspaceDiff = msg.diff
@@ -334,7 +334,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 			return m, m.renderWorkspaceDiffCmd(m.workspacePreviewRequest, msg.diff, width)
 		}
 	case "diff-render":
-		if m.active != workspaceCommitTab || msg.diff.Path != m.workspaceDiff.Path {
+		if !m.workspaceCommitActive() || msg.diff.Path != m.workspaceDiff.Path {
 			return m, nil
 		}
 		m.workspaceDiffRows = msg.rows
@@ -345,7 +345,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 }
 
 func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Model, tea.Cmd) {
-	if msg.request != m.workspaceRequest || m.active != workspaceCommitTab {
+	if msg.request != m.workspaceRequest || !m.workspaceCommitActive() {
 		return m, nil
 	}
 	m.actionBusy = false
@@ -373,7 +373,7 @@ func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 	m.workspaceImage = ""
 	m.workspaceImageWidth = 0
 	m.workspaceImageHeight = 0
-	if m.active == workspaceFilesTab {
+	if m.workspaceFilesActive() {
 		entries := m.filteredWorkspaceEntries()
 		if len(entries) == 0 || entries[m.workspaceCursor].IsDir {
 			m.workspacePreviewOffset = 0
@@ -521,7 +521,7 @@ func (m Model) workspaceDirectoryExists(path string) bool {
 }
 
 func (m Model) toggleWorkspaceDirectory() (Model, tea.Cmd) {
-	if m.active != workspaceFilesTab {
+	if !m.workspaceFilesActive() {
 		return m, nil
 	}
 	entries := m.filteredWorkspaceEntries()
@@ -634,7 +634,7 @@ func (m *Model) clampWorkspaceCursor(length int) {
 
 func (m *Model) ensureWorkspaceCursorVisible() {
 	height := m.workspaceListHeight()
-	if m.active == workspaceCommitTab {
+	if m.workspaceCommitActive() {
 		height = max(1, height-2)
 	}
 	if m.workspaceCursor < m.workspaceOffset {
@@ -685,7 +685,7 @@ func (m Model) workspaceChangeIndexAtRow(row int) int {
 
 func (m Model) moveWorkspaceCursor(delta int) (Model, tea.Cmd) {
 	length := len(m.filteredWorkspaceEntries())
-	if m.active == workspaceCommitTab {
+	if m.workspaceCommitActive() {
 		length = len(m.filteredWorkspaceChanges())
 	}
 	if length == 0 {
@@ -732,7 +732,7 @@ func (m Model) resizeWorkspaceDivider(x int) (Model, tea.Cmd) {
 	left, _ := workspacePaneWidthsAt(m.width, dragRatio)
 	m.workspaceSplitRatio = float64(left) / float64(available)
 
-	if m.active == workspaceFilesTab && m.workspaceFile.Image {
+	if m.workspaceFilesActive() && m.workspaceFile.Image {
 		width, height := m.workspaceImageDimensions()
 		if width != m.workspaceImageWidth || height != m.workspaceImageHeight {
 			m.workspacePreviewRequest++
@@ -740,7 +740,7 @@ func (m Model) resizeWorkspaceDivider(x int) (Model, tea.Cmd) {
 			return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, m.workspaceFile, width, height)
 		}
 	}
-	if m.active == workspaceCommitTab && m.workspaceDiff.Path != "" {
+	if m.workspaceCommitActive() && m.workspaceDiff.Path != "" {
 		_, width := m.workspacePaneWidths()
 		if width != m.workspaceDiffWidth {
 			m.workspacePreviewRequest++
@@ -752,7 +752,7 @@ func (m Model) resizeWorkspaceDivider(x int) (Model, tea.Cmd) {
 }
 
 func (m Model) workspacePreviewLineCount() int {
-	if m.active == workspaceFilesTab {
+	if m.workspaceFilesActive() {
 		if m.workspaceFile.Path == "" {
 			return 1
 		}
@@ -779,7 +779,7 @@ func (m Model) moveWorkspacePreview(delta int) Model {
 }
 
 func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.active == workspaceCommitTab && m.commitMessage.Focused() {
+	if m.workspaceCommitActive() && m.commitMessage.Focused() {
 		switch msg.String() {
 		case "esc":
 			m.commitMessage.Blur()
@@ -816,7 +816,7 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/":
 		return m, m.fileFilter.Focus()
 	case "c", "C":
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			return m, m.commitMessage.Focus()
 		}
 	case "tab", "]":
@@ -850,19 +850,19 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.loadSelectedWorkspaceItem()
 	case "end":
 		length := len(m.filteredWorkspaceEntries())
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			length = len(m.filteredWorkspaceChanges())
 		}
 		m.workspaceCursor = max(0, length-1)
 		m.ensureWorkspaceCursorVisible()
 		return m.loadSelectedWorkspaceItem()
 	case "enter", "right", "l":
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			return m.toggleWorkspaceChangeDirectory(), nil
 		}
 		return m.toggleWorkspaceDirectory()
 	case "left", "h":
-		if m.active == workspaceFilesTab {
+		if m.workspaceFilesActive() {
 			entries := m.filteredWorkspaceEntries()
 			if len(entries) > 0 && entries[m.workspaceCursor].IsDir && m.workspaceExpanded[entries[m.workspaceCursor].Path] {
 				return m.toggleWorkspaceDirectory()
@@ -877,11 +877,11 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.workspaceLoading = false
 		return m.startWorkspaceLoad()
 	case " ", "s", "u":
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			return m.toggleWorkspaceStage(msg.String())
 		}
 	case "S", "U":
-		if m.active == workspaceCommitTab {
+		if m.workspaceCommitActive() {
 			return m.toggleAllWorkspaceStages(msg.String())
 		}
 	}
