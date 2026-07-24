@@ -130,13 +130,15 @@ type Model struct {
 	cursor      map[provider.Kind]int
 	offset      map[provider.Kind]int
 
-	selected      provider.Item
-	detail        provider.Detail
-	viewport      viewport.Model
-	labels        textinput.Model
-	comment       textarea.Model
-	fileFilter    textinput.Model
-	commitMessage textinput.Model
+	selected         provider.Item
+	detail           provider.Detail
+	viewport         viewport.Model
+	labels           textinput.Model
+	comment          textarea.Model
+	fileFilter       textinput.Model
+	commitMessage    textinput.Model
+	graphFilter      textinput.Model
+	graphAuthorScope int // 0 all, 1 mine, 2 others
 
 	workspaceEntries         []worktree.Entry
 	workspaceFile            worktree.File
@@ -214,6 +216,10 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	commitMessage := textinput.New()
 	commitMessage.Placeholder = "Commit message"
 	commitMessage.CharLimit = 1000
+	graphFilter := textinput.New()
+	graphFilter.Prompt = "Search commits: "
+	graphFilter.Placeholder = "message, ref, path, or author"
+	graphFilter.CharLimit = 300
 
 	model := Model{
 		backend:        backend,
@@ -227,6 +233,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		comment:        comment,
 		fileFilter:     fileFilter,
 		commitMessage:  commitMessage,
+		graphFilter:    graphFilter,
 		diffLine:       -1,
 		diffAnchor:     -1,
 		selectedReview: -1,
@@ -456,15 +463,29 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 				return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
 			}
 			commits, err := workspace.History(ctx, 200)
+			name, email := "", ""
+			if identities, ok := workspace.(interface {
+				AuthorIdentity(context.Context) (string, string, error)
+			}); ok {
+				name, email, _ = identities.AuthorIdentity(ctx)
+			}
 			items := make([]provider.Item, 0, len(commits))
 			for _, commit := range commits {
 				refs := make([]provider.CommitRef, 0, len(commit.Refs))
 				for _, ref := range commit.Refs {
 					refs = append(refs, provider.CommitRef{Name: ref.Name, Remote: ref.Remote, Head: ref.Head, Tag: ref.Tag})
 				}
+				search := strings.Join(append([]string{commit.Subject, commit.Author, commit.AuthorEmail}, commit.Paths...), "\x00")
+				for _, ref := range refs {
+					search += "\x00" + ref.Name
+				}
+				mine := (email != "" && strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(commit.AuthorEmail))) || (email == "" && name != "" && strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(commit.Author)))
+				if !m.graphCommitMatches(search, mine) {
+					continue
+				}
 				items = append(items, provider.Item{
 					ID: commit.SHA, Title: commit.Subject, State: "commit", Author: commit.Author,
-					UpdatedAt: commit.AuthoredAt, Meta: shortCommitSHA(commit.SHA), Parents: commit.Parents, Refs: refs,
+					AuthorEmail: commit.AuthorEmail, SearchText: search, AssignedToMe: mine, UpdatedAt: commit.AuthoredAt, Meta: shortCommitSHA(commit.SHA), Parents: commit.Parents, Refs: refs,
 				})
 			}
 			return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
@@ -472,6 +493,17 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 		items, err := m.backend.List(ctx, kind, filter)
 		return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
 	}
+}
+
+func (m Model) graphCommitMatches(search string, mine bool) bool {
+	if m.workspace == nil || m.kind() != provider.Commits {
+		return true
+	}
+	query := strings.ToLower(strings.TrimSpace(m.graphFilter.Value()))
+	if query != "" && !strings.Contains(strings.ToLower(search), query) {
+		return false
+	}
+	return m.graphAuthorScope == 0 || (m.graphAuthorScope == 1 && mine) || (m.graphAuthorScope == 2 && !mine)
 }
 
 func shortCommitSHA(sha string) string {
@@ -496,6 +528,44 @@ func (m Model) actionCmd(name string, run func(context.Context) error) tea.Cmd {
 		defer cancel()
 		return actionResultMsg{action: name, err: run(ctx)}
 	}
+}
+
+func (m Model) startGraphAction(key string) tea.Cmd {
+	items := m.items[provider.Commits]
+	index := m.cursor[provider.Commits]
+	if index < 0 || index >= len(items) {
+		m.status = "select a commit first"
+		return nil
+	}
+	sha := items[index].ID
+	actions, ok := m.workspace.(interface {
+		Checkout(context.Context, string) error
+		CherryPick(context.Context, string) error
+		ResetSoft(context.Context, string) error
+		ResetHard(context.Context, string) error
+		Revert(context.Context, string) error
+	})
+	if !ok {
+		m.status = "Graph actions are unavailable for this workspace"
+		return nil
+	}
+	m.actionBusy = true
+	var name string
+	var run func(context.Context) error
+	switch key {
+	case "o":
+		name, run = "checkout detached HEAD at "+shortCommitSHA(sha), func(ctx context.Context) error { return actions.Checkout(ctx, sha) }
+	case "p":
+		name, run = "cherry-pick "+shortCommitSHA(sha), func(ctx context.Context) error { return actions.CherryPick(ctx, sha) }
+	case "z":
+		name, run = "soft reset to "+shortCommitSHA(sha), func(ctx context.Context) error { return actions.ResetSoft(ctx, sha) }
+	case "Z":
+		name, run = "HARD reset to "+shortCommitSHA(sha), func(ctx context.Context) error { return actions.ResetHard(ctx, sha) }
+	case "v":
+		name, run = "revert "+shortCommitSHA(sha), func(ctx context.Context) error { return actions.Revert(ctx, sha) }
+	}
+	m.status = name + " running…"
+	return m.actionCmd(name, run)
 }
 
 func (m Model) startListLoad() (Model, tea.Cmd) {
@@ -737,6 +807,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.workspace != nil && m.kind() == provider.Commits && m.graphFilter.Focused() {
+		if msg.String() == "esc" {
+			m.graphFilter.Blur()
+			return m, nil
+		}
+		old := m.graphFilter.Value()
+		var cmd tea.Cmd
+		m.graphFilter, cmd = m.graphFilter.Update(msg)
+		if old != m.graphFilter.Value() {
+			m.loadingList = false
+			return m.startListLoad()
+		}
+		return m, cmd
+	}
 	if m.actionBusy {
 		if msg.String() == "q" {
 			return m, tea.Quit
@@ -769,9 +853,32 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startActiveTabLoad()
 		}
 	case "left", "h":
+		if m.workspace != nil && m.kind() == provider.Commits {
+			m.graphAuthorScope = (m.graphAuthorScope + 2) % 3
+			m.loadingList = false
+			return m.startListLoad()
+		}
 		return m.changeFilter(-1)
 	case "right", "l":
+		if m.workspace != nil && m.kind() == provider.Commits {
+			m.graphAuthorScope = (m.graphAuthorScope + 1) % 3
+			m.loadingList = false
+			return m.startListLoad()
+		}
 		return m.changeFilter(1)
+	case "/":
+		if m.workspace != nil && m.kind() == provider.Commits {
+			return m, m.graphFilter.Focus()
+		}
+	case "o", "p", "z", "Z", "v":
+		if m.workspace != nil && m.kind() == provider.Commits {
+			return m, m.startGraphAction(msg.String())
+		}
+		if msg.String() == "o" {
+			if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
+				return m.startIssueStateAction(item, true)
+			}
+		}
 	case "up", "k":
 		m.moveCursor(-1)
 	case "down", "j":
@@ -791,7 +898,7 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
 			return m.startIssueStateAction(item, false)
 		}
-	case "o", "O":
+	case "O":
 		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
 			return m.startIssueStateAction(item, true)
 		}

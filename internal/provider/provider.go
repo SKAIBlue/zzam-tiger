@@ -64,6 +64,8 @@ type Item struct {
 	Title        string
 	State        string
 	Author       string
+	AuthorEmail  string
+	SearchText   string
 	Assignees    []Assignee
 	AssignedToMe bool
 	HeadSHA      string

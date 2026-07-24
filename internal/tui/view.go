@@ -322,6 +322,18 @@ func (m Model) workspaceList(width, height int) string {
 }
 
 func (m Model) filtersView() string {
+	if m.workspace != nil && m.kind() == provider.Commits {
+		scopes := []string{"All", "Mine", "Others"}
+		query := m.graphFilter.View()
+		if !m.graphFilter.Focused() {
+			if value := m.graphFilter.Value(); value != "" {
+				query = "Search commits: " + value
+			} else {
+				query = "Search commits: press /"
+			}
+		}
+		return " " + activeFilter.Render(" "+scopes[m.graphAuthorScope]+" ") + "  " + query
+	}
 	filters := m.backend.Filters(m.kind())
 	parts := make([]string, 0, len(filters))
 	for index, filter := range filters {
@@ -460,6 +472,9 @@ func indexOfString(values []string, target string) int {
 
 func (m Model) listHelp() string {
 	help := fmt.Sprintf(" ↑/↓ select · ←/→ filter · Shift+1...%d tabs · Enter detail", m.tabCount())
+	if m.workspace != nil && m.kind() == provider.Commits {
+		help = " ↑/↓ select · / search · ←/→ author scope · o checkout · p cherry-pick · z soft reset · Z hard reset · v revert"
+	}
 	if m.kind() == provider.Issues {
 		help += " · C close · O open"
 	}

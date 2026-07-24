@@ -107,12 +107,14 @@ type Ref struct {
 
 // Commit is one entry in the repository's reachable history.
 type Commit struct {
-	SHA        string
-	Parents    []string
-	Subject    string
-	Author     string
-	AuthoredAt time.Time
-	Refs       []Ref
+	SHA         string
+	Parents     []string
+	Subject     string
+	Author      string
+	AuthorEmail string
+	Paths       []string
+	AuthoredAt  time.Time
+	Refs        []Ref
 }
 
 // Branch is a local or remote ref available from the Git repository.
@@ -286,8 +288,10 @@ func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
 	if limit <= 0 || limit > maxHistoryCommits {
 		limit = maxHistoryCommits
 	}
-	out, err := c.git(ctx, "log", "--all", "--topo-order", "-z", fmt.Sprintf("-n%d", limit),
-		"--format=%H%x00%P%x00%s%x00%an%x00%aI")
+	// Record separators make path names (which may contain spaces and newlines)
+	// unambiguous without invoking Git once per commit.
+	out, err := c.git(ctx, "log", "--all", "--topo-order", "--name-only", "-z", fmt.Sprintf("-n%d", limit),
+		"--format=%x1e%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00")
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +313,79 @@ func (c *Client) History(ctx context.Context, limit int) ([]Commit, error) {
 		commits[i].Refs = refs[commits[i].SHA]
 	}
 	return commits, nil
+}
+
+// AuthorIdentity returns the effective repository author configuration.
+func (c *Client) AuthorIdentity(ctx context.Context) (name, email string, err error) {
+	out, err := c.git(ctx, "config", "--get", "user.name")
+	if err == nil {
+		name = strings.TrimSpace(string(out))
+	}
+	out, emailErr := c.git(ctx, "config", "--get", "user.email")
+	if emailErr == nil {
+		email = strings.TrimSpace(string(out))
+	}
+	if name == "" && email == "" {
+		return "", "", fmt.Errorf("Git author identity is not configured")
+	}
+	return name, email, nil
+}
+
+func (c *Client) ensureSafeForHistoryAction(ctx context.Context) error {
+	if _, err := c.git(ctx, "rev-parse", "--verify", "-q", "MERGE_HEAD"); err == nil {
+		return fmt.Errorf("a merge is already in progress")
+	}
+	if _, err := c.git(ctx, "rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"); err == nil {
+		return fmt.Errorf("a cherry-pick is already in progress")
+	}
+	if _, err := c.git(ctx, "rev-parse", "--verify", "-q", "REVERT_HEAD"); err == nil {
+		return fmt.Errorf("a revert is already in progress")
+	}
+	status, err := c.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if len(status.Staged)+len(status.Unstaged)+len(status.Untracked) != 0 {
+		return fmt.Errorf("working tree has changes; commit, stash, or discard them before this operation")
+	}
+	return nil
+}
+
+func validSHA(sha string) bool {
+	if len(sha) != 40 {
+		return false
+	}
+	for _, r := range sha {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+func (c *Client) historyAction(ctx context.Context, sha string, args ...string) error {
+	if !validSHA(sha) {
+		return fmt.Errorf("invalid commit SHA")
+	}
+	if err := c.ensureSafeForHistoryAction(ctx); err != nil {
+		return err
+	}
+	_, err := c.git(ctx, args...)
+	return err
+}
+func (c *Client) Checkout(ctx context.Context, sha string) error {
+	return c.historyAction(ctx, sha, "checkout", "--detach", sha)
+}
+func (c *Client) CherryPick(ctx context.Context, sha string) error {
+	return c.historyAction(ctx, sha, "cherry-pick", sha)
+}
+func (c *Client) ResetSoft(ctx context.Context, sha string) error {
+	return c.historyAction(ctx, sha, "reset", "--soft", sha)
+}
+func (c *Client) ResetHard(ctx context.Context, sha string) error {
+	return c.historyAction(ctx, sha, "reset", "--hard", sha)
+}
+func (c *Client) Revert(ctx context.Context, sha string) error {
+	return c.historyAction(ctx, sha, "revert", "--no-edit", sha)
 }
 
 // Branches lists local and remote branches without requiring a hosting CLI.
@@ -613,31 +690,54 @@ func parseHistory(data []byte) ([]Commit, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-	fields := bytes.Split(data, []byte{0})
-	if len(fields) > 0 && len(fields[len(fields)-1]) == 0 {
-		fields = fields[:len(fields)-1]
+	// Retain support for the original five-field stream. It is useful for
+	// lightweight runners and makes the parser tolerant of older Git fixtures.
+	if !bytes.Contains(data, []byte{0x1e}) {
+		fields := bytes.Split(data, []byte{0})
+		if len(fields) > 0 && len(fields[len(fields)-1]) == 0 {
+			fields = fields[:len(fields)-1]
+		}
+		if len(fields)%5 != 0 {
+			return nil, fmt.Errorf("invalid Git history: got %d fields", len(fields))
+		}
+		commits := make([]Commit, 0, len(fields)/5)
+		for i := 0; i < len(fields); i += 5 {
+			at, err := time.Parse(time.RFC3339, string(fields[i+4]))
+			if err != nil {
+				return nil, fmt.Errorf("parse authored time for %s: %w", fields[i], err)
+			}
+			commits = append(commits, Commit{SHA: string(fields[i]), Parents: strings.Fields(string(fields[i+1])), Subject: string(fields[i+2]), Author: string(fields[i+3]), AuthoredAt: at})
+		}
+		return commits, nil
 	}
-	const fieldsPerCommit = 5
-	if len(fields)%fieldsPerCommit != 0 {
-		return nil, fmt.Errorf("invalid Git history: got %d fields", len(fields))
-	}
-	commits := make([]Commit, 0, len(fields)/fieldsPerCommit)
-	for i := 0; i < len(fields); i += fieldsPerCommit {
-		sha := string(fields[i])
+	records := bytes.Split(data, []byte{0x1e})
+	commits := make([]Commit, 0, len(records))
+	for _, record := range records[1:] {
+		fields := bytes.Split(record, []byte{0})
+		if len(fields) < 6 {
+			return nil, fmt.Errorf("invalid Git history record")
+		}
+		sha := string(fields[0])
 		if sha == "" {
 			return nil, fmt.Errorf("invalid Git history: empty commit SHA")
 		}
-		authoredAt, err := time.Parse(time.RFC3339, string(fields[i+4]))
+		authoredAt, err := time.Parse(time.RFC3339, string(fields[5]))
 		if err != nil {
 			return nil, fmt.Errorf("parse authored time for %s: %w", sha, err)
 		}
 		var parents []string
-		if len(fields[i+1]) > 0 {
-			parents = strings.Fields(string(fields[i+1]))
+		if len(fields[1]) > 0 {
+			parents = strings.Fields(string(fields[1]))
+		}
+		paths := make([]string, 0, len(fields)-6)
+		for _, path := range fields[6:] {
+			if len(path) > 0 {
+				paths = append(paths, string(path))
+			}
 		}
 		commits = append(commits, Commit{
-			SHA: sha, Parents: parents, Subject: string(fields[i+2]),
-			Author: string(fields[i+3]), AuthoredAt: authoredAt,
+			SHA: sha, Parents: parents, Subject: string(fields[2]),
+			Author: string(fields[3]), AuthorEmail: string(fields[4]), Paths: paths, AuthoredAt: authoredAt,
 		})
 	}
 	return commits, nil
