@@ -445,6 +445,41 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitFolderClickCollapsesAndExpandsChildren(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
+	m.workspaceStatus.Unstaged = []worktree.Change{
+		{Path: "cmd/app/main.go", Code: 'M'},
+		{Path: "cmd/app/run.go", Code: 'M'},
+		{Path: "README.md", Code: 'M'},
+	}
+	m.workspaceLoading = false
+	if got := len(m.filteredWorkspaceChanges()); got != 5 {
+		t.Fatalf("expanded changes = %d, want 5", got)
+	}
+
+	// The group header is row 5 and the first sorted item (README.md) is row 6,
+	// so the cmd directory is the next clickable row.
+	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd != nil || !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")] {
+		t.Fatalf("collapse click: cmd=%v collapsed=%t", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")])
+	}
+	changes := m.filteredWorkspaceChanges()
+	if len(changes) != 2 || changes[0].path != "README.md" || changes[1].path != "cmd" {
+		t.Fatalf("collapsed changes = %#v", changes)
+	}
+	if rendered := m.workspaceList(50, 10); !strings.Contains(rendered, "▸ cmd") {
+		t.Fatalf("collapsed folder icon missing: %q", rendered)
+	}
+
+	updated, cmd = m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd != nil || m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")] || len(m.filteredWorkspaceChanges()) != 5 {
+		t.Fatalf("expand click: cmd=%v collapsed=%t changes=%d", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")], len(m.filteredWorkspaceChanges()))
+	}
+}
+
 func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
 	workspace := &fakeWorkspace{}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
@@ -628,6 +663,122 @@ func TestWorkspacePaneWidthsStayWithinTerminal(t *testing.T) {
 		if left < 1 || right < 1 || left+3+right > width {
 			t.Fatalf("width %d => left=%d right=%d", width, left, right)
 		}
+	}
+}
+
+func TestWorkspaceDividerDragUpdatesAndStopsOnRelease(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceFilesTab, 120, 20
+	left, _ := m.workspacePaneWidths()
+
+	updated, cmd := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd != nil || !m.workspaceDividerDragging {
+		t.Fatalf("divider press: dragging=%t cmd=%v", m.workspaceDividerDragging, cmd != nil)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 70, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	left, _ = m.workspacePaneWidths()
+	if left != 69 {
+		t.Fatalf("dragged left width = %d, want 69", left)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 70, Y: 6, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	m = updated.(Model)
+	if m.workspaceDividerDragging {
+		t.Fatal("divider remained active after release")
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 40, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if got, _ := m.workspacePaneWidths(); got != left {
+		t.Fatalf("motion after release changed width to %d", got)
+	}
+}
+
+func TestWorkspaceDividerDragClampsAndResizePreservesRatio(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceFilesTab, 120, 20
+	left, _ := m.workspacePaneWidths()
+	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.MouseMsg{X: -20, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if left, _ := m.workspacePaneWidths(); left != workspacePaneMinWidth {
+		t.Fatalf("left clamp = %d, want %d", left, workspacePaneMinWidth)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 500, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if _, right := m.workspacePaneWidths(); right != workspacePaneMinWidth {
+		t.Fatalf("right clamp = %d, want %d", right, workspacePaneMinWidth)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 60, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	ratio := m.workspaceSplitRatio
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated.(Model)
+	left, right := m.workspacePaneWidths()
+	if m.workspaceDividerDragging || left < workspacePaneMinWidth || right < workspacePaneMinWidth {
+		t.Fatalf("resize state: dragging=%t left=%d right=%d", m.workspaceDividerDragging, left, right)
+	}
+	if got := float64(left) / float64(m.width-3); got < ratio-0.02 || got > ratio+0.02 {
+		t.Fatalf("resize ratio = %.3f, want near %.3f", got, ratio)
+	}
+	if left, right := workspacePaneWidthsAt(12, ratio); left < 1 || right < 1 || left+3+right > 12 {
+		t.Fatalf("narrow layout left=%d right=%d", left, right)
+	}
+}
+
+func TestWorkspaceDividerDoesNotStealListClicks(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceFilesTab, 120, 20
+	m.workspaceEntries = []worktree.Entry{{Path: "one.txt", Name: "one.txt"}, {Path: "two.txt", Name: "two.txt"}}
+	m.workspaceLoading = false
+
+	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.workspaceDividerDragging || m.workspaceCursor != 1 || cmd == nil {
+		t.Fatalf("list click conflict: dragging=%t cursor=%d cmd=%v", m.workspaceDividerDragging, m.workspaceCursor, cmd != nil)
+	}
+}
+
+func TestWorkspaceDividerInvalidatesStaleImageRender(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceFilesTab, 120, 20
+	m.workspaceFile = worktree.File{Path: "preview.png", Image: true, Data: []byte("not-an-image")}
+	m.workspaceImageWidth = 77
+	m.workspaceImageHeight = m.workspaceListHeight() - 1
+	m.workspacePreviewRequest = 4
+	left, _ := m.workspacePaneWidths()
+
+	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	updated, cmd := m.Update(tea.MouseMsg{X: 65, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if cmd == nil || m.workspacePreviewRequest != 5 || !m.workspacePreviewLoading {
+		t.Fatalf("drag render: cmd=%v request=%d loading=%t", cmd != nil, m.workspacePreviewRequest, m.workspacePreviewLoading)
+	}
+	updated, _ = m.Update(workspaceResultMsg{request: 4, op: "image", file: m.workspaceFile, image: "stale", width: 77, height: m.workspaceImageHeight})
+	m = updated.(Model)
+	if m.workspaceImage == "stale" || !m.workspacePreviewLoading {
+		t.Fatalf("stale image won: image=%q loading=%t", m.workspaceImage, m.workspacePreviewLoading)
+	}
+}
+
+func TestWorkspaceDividerRendersAtFullBodyHeight(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	height := 7
+	rendered := m.workspaceDividerView(height)
+	rows := strings.Split(rendered, "\n")
+	if len(rows) != height {
+		t.Fatalf("divider rows = %d, want %d", len(rows), height)
+	}
+	for index, row := range rows {
+		if !strings.Contains(row, "┃") || lipgloss.Width(row) != 3 {
+			t.Fatalf("divider row %d = %q, width %d", index, row, lipgloss.Width(row))
+		}
+	}
+	m.workspaceDividerDragging = true
+	if active := m.workspaceDividerView(1); !strings.Contains(active, " ┃ ") || strings.Contains(active, "━") {
+		t.Fatalf("active divider = %q", active)
 	}
 }
 

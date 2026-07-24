@@ -156,7 +156,7 @@ func (m Model) workspaceView() string {
 	}
 
 	bodyHeight := m.workspaceListHeight()
-	leftWidth, rightWidth := workspacePaneWidths(m.width)
+	leftWidth, rightWidth := m.workspacePaneWidths()
 	left := m.workspaceList(leftWidth, bodyHeight)
 	right := ""
 	if m.active == workspaceFilesTab {
@@ -170,7 +170,7 @@ func (m Model) workspaceView() string {
 	}
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		lipgloss.NewStyle().Width(leftWidth).Height(bodyHeight).Render(left),
-		metaStyle.Render(" │ "),
+		m.workspaceDividerView(bodyHeight),
 		lipgloss.NewStyle().Width(rightWidth).Height(bodyHeight).Render(right),
 	)
 	lines = append(lines, strings.Split(body, "\n")...)
@@ -178,12 +178,25 @@ func (m Model) workspaceView() string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, m.statusLine())
-	help := " ↑/↓ select · Enter/→ expand · ← collapse · click toggle · PgUp/PgDn preview · / filter"
+	help := " ↑/↓ select · Enter/→ expand · ← collapse · drag divider resize · PgUp/PgDn preview · / filter"
 	if m.active == workspaceCommitTab {
-		help = " c message · Enter commit · click Commit · ↑/↓ select · Space toggle · s/u file or folder · S/U all · / filter"
+		help = " c message · Enter commit · drag divider resize · ↑/↓ select · Space toggle · s/u file or folder · S/U all · / filter"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) workspaceDividerView(height int) string {
+	divider := lipgloss.NewStyle().Foreground(border)
+	glyph := " ┃ "
+	if m.workspaceDividerDragging {
+		divider = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	}
+	rows := make([]string, max(1, height))
+	for index := range rows {
+		rows[index] = divider.Render(glyph)
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) workspaceCommitComposer() string {
@@ -258,6 +271,9 @@ func (m Model) workspaceList(width, height int) string {
 		if item.isDir {
 			badge = " "
 			icon = "▾"
+			if m.workspaceChangeCollapsed[workspaceChangeExpansionKey(item.staged, item.path)] {
+				icon = "▸"
+			}
 		} else if badge == "?" {
 			badge = "U"
 		}

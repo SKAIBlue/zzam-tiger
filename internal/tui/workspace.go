@@ -137,12 +137,12 @@ func (m Model) renderWorkspaceImageCmd(request uint64, file worktree.File, width
 }
 
 func (m Model) workspaceImageDimensions() (int, int) {
-	_, width := workspacePaneWidths(m.width)
+	_, width := m.workspacePaneWidths()
 	return width, max(1, m.workspaceListHeight()-1)
 }
 
 func (m Model) fetchWorkspaceDiffCmd(request uint64, path string, staged bool) tea.Cmd {
-	_, width := workspacePaneWidths(m.width)
+	_, width := m.workspacePaneWidths()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -312,7 +312,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		m.workspaceDiffRows = msg.rows
 		m.workspaceDiffWidth = msg.width
 		m.workspacePreviewLoading = false
-		_, width := workspacePaneWidths(m.width)
+		_, width := m.workspacePaneWidths()
 		if msg.width != width {
 			m.workspacePreviewRequest++
 			m.workspacePreviewLoading = true
@@ -527,9 +527,45 @@ func (m Model) filteredWorkspaceChanges() []workspaceChange {
 	query := strings.ToLower(strings.TrimSpace(m.fileFilter.Value()))
 	staged, changes := sortedChangeGroups(m.workspaceStatus, query)
 	result := make([]workspaceChange, 0, len(staged)+len(changes))
-	result = append(result, workspaceChangeTree(staged, true)...)
-	result = append(result, workspaceChangeTree(changes, false)...)
+	result = append(result, m.visibleWorkspaceChangeTree(workspaceChangeTree(staged, true))...)
+	result = append(result, m.visibleWorkspaceChangeTree(workspaceChangeTree(changes, false))...)
 	return result
+}
+
+func (m Model) visibleWorkspaceChangeTree(changes []workspaceChange) []workspaceChange {
+	result := make([]workspaceChange, 0, len(changes))
+	for _, change := range changes {
+		hidden := false
+		for parent := workspaceParent(change.path); parent != ""; parent = workspaceParent(parent) {
+			if m.workspaceChangeCollapsed[workspaceChangeExpansionKey(change.staged, parent)] {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			result = append(result, change)
+		}
+	}
+	return result
+}
+
+func workspaceChangeExpansionKey(staged bool, path string) string {
+	if staged {
+		return "staged:" + path
+	}
+	return "changes:" + path
+}
+
+func (m Model) toggleWorkspaceChangeDirectory() Model {
+	changes := m.filteredWorkspaceChanges()
+	if m.workspaceCursor < 0 || m.workspaceCursor >= len(changes) || !changes[m.workspaceCursor].isDir {
+		return m
+	}
+	selected := changes[m.workspaceCursor]
+	key := workspaceChangeExpansionKey(selected.staged, selected.path)
+	m.workspaceChangeCollapsed[key] = !m.workspaceChangeCollapsed[key]
+	m.clampWorkspaceCursor(len(m.filteredWorkspaceChanges()))
+	return m
 }
 
 func workspaceChangeTree(changes []worktree.Change, staged bool) []workspaceChange {
@@ -639,13 +675,57 @@ func (m Model) moveWorkspaceCursor(delta int) (Model, tea.Cmd) {
 }
 
 func workspacePaneWidths(total int) (left, right int) {
-	left = min(42, max(12, total/3))
-	if total < 64 {
-		left = max(10, (total-3)/2)
+	return workspacePaneWidthsAt(total, 0)
+}
+
+const workspacePaneMinWidth = 10
+
+func workspacePaneWidthsAt(total int, ratio float64) (left, right int) {
+	available := max(2, total-3)
+	if ratio > 0 {
+		left = int(float64(available)*ratio + 0.5)
+	} else {
+		left = min(42, max(12, total/3))
+		if total < 64 {
+			left = max(workspacePaneMinWidth, (total-3)/2)
+		}
 	}
-	left = min(left, max(1, total-4))
-	right = max(1, total-left-3)
+	if available >= workspacePaneMinWidth*2 {
+		left = min(available-workspacePaneMinWidth, max(workspacePaneMinWidth, left))
+	} else {
+		left = min(available-1, max(1, left))
+	}
+	right = max(1, available-left)
 	return left, right
+}
+
+func (m Model) workspacePaneWidths() (left, right int) {
+	return workspacePaneWidthsAt(m.width, m.workspaceSplitRatio)
+}
+
+func (m Model) resizeWorkspaceDivider(x int) (Model, tea.Cmd) {
+	available := max(2, m.width-3)
+	dragRatio := max(1.0/float64(available), float64(x-1)/float64(available))
+	left, _ := workspacePaneWidthsAt(m.width, dragRatio)
+	m.workspaceSplitRatio = float64(left) / float64(available)
+
+	if m.active == workspaceFilesTab && m.workspaceFile.Image {
+		width, height := m.workspaceImageDimensions()
+		if width != m.workspaceImageWidth || height != m.workspaceImageHeight {
+			m.workspacePreviewRequest++
+			m.workspacePreviewLoading = true
+			return m, m.renderWorkspaceImageCmd(m.workspacePreviewRequest, m.workspaceFile, width, height)
+		}
+	}
+	if m.active == workspaceCommitTab && m.workspaceDiff.Path != "" {
+		_, width := m.workspacePaneWidths()
+		if width != m.workspaceDiffWidth {
+			m.workspacePreviewRequest++
+			m.workspacePreviewLoading = true
+			return m, m.renderWorkspaceDiffCmd(m.workspacePreviewRequest, m.workspaceDiff, width)
+		}
+	}
+	return m, nil
 }
 
 func (m Model) workspacePreviewLineCount() int {
@@ -749,12 +829,20 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureWorkspaceCursorVisible()
 		return m.loadSelectedWorkspaceItem()
 	case "enter", "right", "l":
+		if m.active == workspaceCommitTab {
+			return m.toggleWorkspaceChangeDirectory(), nil
+		}
 		return m.toggleWorkspaceDirectory()
 	case "left", "h":
 		if m.active == workspaceFilesTab {
 			entries := m.filteredWorkspaceEntries()
 			if len(entries) > 0 && entries[m.workspaceCursor].IsDir && m.workspaceExpanded[entries[m.workspaceCursor].Path] {
 				return m.toggleWorkspaceDirectory()
+			}
+		} else {
+			changes := m.filteredWorkspaceChanges()
+			if len(changes) > 0 && changes[m.workspaceCursor].isDir && !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(changes[m.workspaceCursor].staged, changes[m.workspaceCursor].path)] {
+				return m.toggleWorkspaceChangeDirectory(), nil
 			}
 		}
 	case "r":
@@ -1072,6 +1160,9 @@ func renderWorkspaceDiff(diff worktree.Diff, width int) string {
 	if width < 100 {
 		return renderUnifiedWorkspaceDiff(diff, width)
 	}
+	// The nested old/new divider intentionally remains an equal-width rendering
+	// detail. Only the workspace list/preview divider owns a mouse drag target;
+	// a second nested target would conflict with diff review interactions.
 	column := max(12, (width-3)/2)
 	oldText := sanitizeWorkspaceText(strings.ReplaceAll(string(diff.Old), "\r\n", "\n"))
 	newText := sanitizeWorkspaceText(strings.ReplaceAll(string(diff.New), "\r\n", "\n"))

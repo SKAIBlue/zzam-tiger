@@ -114,27 +114,30 @@ type Model struct {
 	fileFilter    textinput.Model
 	commitMessage textinput.Model
 
-	workspaceEntries        []worktree.Entry
-	workspaceFile           worktree.File
-	workspaceImage          string
-	workspaceImageWidth     int
-	workspaceImageHeight    int
-	workspaceStatus         worktree.Status
-	workspaceDiff           worktree.Diff
-	workspaceDiffRows       []string
-	workspaceDiffWidth      int
-	workspaceCursor         int
-	workspaceOffset         int
-	workspacePreviewOffset  int
-	workspacePendingPath    string
-	workspaceRequest        uint64
-	workspaceEntryRequest   uint64
-	workspaceEntryPending   int
-	workspacePreviewRequest uint64
-	workspaceLoading        bool
-	workspacePreviewLoading bool
-	workspaceExpanded       map[string]bool
-	workspaceLoaded         map[string]bool
+	workspaceEntries         []worktree.Entry
+	workspaceFile            worktree.File
+	workspaceImage           string
+	workspaceImageWidth      int
+	workspaceImageHeight     int
+	workspaceStatus          worktree.Status
+	workspaceDiff            worktree.Diff
+	workspaceDiffRows        []string
+	workspaceDiffWidth       int
+	workspaceCursor          int
+	workspaceOffset          int
+	workspacePreviewOffset   int
+	workspacePendingPath     string
+	workspaceRequest         uint64
+	workspaceEntryRequest    uint64
+	workspaceEntryPending    int
+	workspacePreviewRequest  uint64
+	workspaceLoading         bool
+	workspacePreviewLoading  bool
+	workspaceExpanded        map[string]bool
+	workspaceLoaded          map[string]bool
+	workspaceChangeCollapsed map[string]bool
+	workspaceSplitRatio      float64
+	workspaceDividerDragging bool
 
 	commentMode      commentMode
 	commentItem      provider.Item
@@ -231,6 +234,7 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceLoading = true
 	model.workspaceExpanded = make(map[string]bool)
 	model.workspaceLoaded = make(map[string]bool)
+	model.workspaceChangeCollapsed = make(map[string]bool)
 	return model
 }
 
@@ -375,6 +379,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.workspaceDividerDragging = false
 		m.resizeViewport()
 		if m.screen == diffScreen || m.commentUsesDiffBackground() {
 			m.setDiffContent()
@@ -390,7 +395,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.localTab() && !m.workspacePreviewLoading && m.active == workspaceCommitTab && m.workspaceDiff.Path != "" {
-			_, width := workspacePaneWidths(m.width)
+			_, width := m.workspacePaneWidths()
 			if width != m.workspaceDiffWidth {
 				m.workspacePreviewRequest++
 				m.workspacePreviewLoading = true
@@ -1488,6 +1493,18 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.updateAvailable = false
 		return m, tea.ExecProcess(m.installUpdate(), func(error) tea.Msg { return installFinishedMsg{} })
 	}
+	if m.workspaceDividerDragging {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			m.workspaceDividerDragging = false
+			return m, nil
+		case tea.MouseActionMotion:
+			return m.resizeWorkspaceDivider(msg.X)
+		case tea.MouseActionPress:
+			// Recover if a terminal failed to deliver the prior release.
+			m.workspaceDividerDragging = false
+		}
+	}
 	if m.actionBusy {
 		return m, nil
 	}
@@ -1502,7 +1519,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.localTab() {
-		leftWidth, _ := workspacePaneWidths(m.width)
+		leftWidth, _ := m.workspacePaneWidths()
+		dividerStart, dividerEnd := leftWidth, leftWidth+2
+		bodyStart := 5
+		bodyEnd := bodyStart + m.workspaceListHeight()
+		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= bodyStart && msg.Y < bodyEnd && msg.X >= dividerStart && msg.X <= dividerEnd {
+			m.workspaceDividerDragging = true
+			return m, nil
+		}
 		if m.active == workspaceCommitTab && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
 			buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
 			buttonStart := max(0, m.width-buttonWidth-1)
@@ -1544,6 +1568,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.ensureWorkspaceCursorVisible()
 			if m.active == workspaceFilesTab && m.filteredWorkspaceEntries()[index].IsDir {
 				return m.toggleWorkspaceDirectory()
+			}
+			if m.active == workspaceCommitTab && m.filteredWorkspaceChanges()[index].isDir {
+				return m.toggleWorkspaceChangeDirectory(), nil
 			}
 			return m.loadSelectedWorkspaceItem()
 		}
