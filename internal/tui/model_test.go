@@ -312,6 +312,29 @@ func TestCIRunShortcutsWorkFromDetail(t *testing.T) {
 	}
 }
 
+func TestCompletedCIRunDetailDoesNotAutoRefreshLogs(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.CIRuns)
+	m.refresh = time.Second
+	m.selected.State = "completed/success"
+	m.detail.Item.State = m.selected.State
+
+	updated, cmd := m.Update(tickMsg(time.Now()))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("polling tick was not rescheduled")
+	}
+	if m.loadingDetail {
+		t.Fatal("completed CI run started an automatic detail refresh")
+	}
+
+	m.selected.State = "running"
+	updated, cmd = m.Update(tickMsg(time.Now()))
+	m = updated.(Model)
+	if cmd == nil || !m.loadingDetail {
+		t.Fatal("running CI run did not start an automatic detail refresh")
+	}
+}
+
 func TestLeftRightChangeFilter(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.loadingList = false
@@ -1377,6 +1400,68 @@ func TestInlineReviewIgnoresWheelNavigationBehindEditor(t *testing.T) {
 	_ = cmd()
 	if len(backend.reviews) != 1 || backend.reviews[0].target != frozen {
 		t.Fatalf("submitted target changed after wheel input: %#v", backend.reviews)
+	}
+}
+
+func TestDetailWheelScrollIgnoresNonPressInput(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.CIRuns)
+	m.viewport.SetContent(strings.Repeat("log line\n", 100))
+	m.viewport.SetYOffset(20)
+
+	updated, _ := m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionRelease})
+	m = updated.(Model)
+	if m.viewport.YOffset != 20 {
+		t.Fatalf("wheel release scrolled detail: offset=%d", m.viewport.YOffset)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.viewport.YOffset != 17 {
+		t.Fatalf("wheel press offset=%d, want 17", m.viewport.YOffset)
+	}
+}
+
+func TestCoalescedWheelScrollMovesDetailByCombinedDelta(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.CIRuns)
+	m.viewport.SetContent(strings.Repeat("log line\n", 200))
+	m.viewport.SetYOffset(180)
+
+	updated, _ := m.Update(WheelScrollMsg{Delta: -60})
+	m = updated.(Model)
+	if m.viewport.YOffset != 0 {
+		t.Fatalf("coalesced upward scroll offset=%d, want 0", m.viewport.YOffset)
+	}
+
+	updated, _ = m.Update(WheelScrollMsg{Delta: 20})
+	m = updated.(Model)
+	if m.viewport.YOffset != 60 {
+		t.Fatalf("coalesced downward scroll offset=%d, want 60", m.viewport.YOffset)
+	}
+}
+
+func TestCoalescedWheelScrollMovesListAndDiff(t *testing.T) {
+	list := New(fakeProvider{}, 0)
+	list.loadingList = false
+	list.items[provider.PullRequests] = []provider.Item{{ID: "1"}, {ID: "2"}, {ID: "3"}, {ID: "4"}, {ID: "5"}}
+	updated, _ := list.Update(WheelScrollMsg{Delta: 2})
+	list = updated.(Model)
+	if list.cursor[provider.PullRequests] != 4 {
+		t.Fatalf("coalesced list scroll cursor=%d, want 4", list.cursor[provider.PullRequests])
+	}
+
+	diff := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	diff.screen = diffScreen
+	diff.detail.Diffs = []provider.DiffFile{{NewPath: "file.go", Lines: []provider.DiffLine{
+		{NewLine: 1, Text: " one"}, {NewLine: 2, Text: " two"}, {NewLine: 3, Text: " three"},
+		{NewLine: 4, Text: " four"}, {NewLine: 5, Text: " five"}, {NewLine: 6, Text: " six"},
+		{NewLine: 7, Text: " seven"}, {NewLine: 8, Text: " eight"}, {NewLine: 9, Text: " nine"},
+		{NewLine: 10, Text: " ten"},
+	}}}
+	diff.setDiffContent()
+	updated, _ = diff.Update(WheelScrollMsg{Delta: 2})
+	diff = updated.(Model)
+	if diff.diffLine != 5 {
+		t.Fatalf("coalesced diff scroll line=%d, want 5", diff.diffLine)
 	}
 }
 

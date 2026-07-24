@@ -74,6 +74,8 @@ type Item struct {
 	URL          string
 	Parents      []string
 	Refs         []CommitRef
+	// Paths contains paths changed by a commit when the item represents local history.
+	Paths []string
 }
 
 type Section struct {
@@ -81,19 +83,48 @@ type Section struct {
 	Markdown string
 }
 
-const maxCILogBytes = 2 << 20
+const (
+	maxCILogBytes     = 2 << 20
+	maxCILogLineRunes = 240
+)
 
 func ciLogMarkdown(data []byte) string {
 	truncated := len(data) > maxCILogBytes
 	if truncated {
 		data = data[:maxCILogBytes]
 	}
-	text := sanitizeCILog(string(data))
+	text := wrapCILogLines(sanitizeCILog(string(data)), maxCILogLineRunes)
 	markdown := "    " + strings.ReplaceAll(text, "\n", "\n    ")
 	if truncated {
 		markdown += "\n\n_Log truncated after 2 MiB._"
 	}
 	return markdown
+}
+
+// wrapCILogLines keeps a single malformed or machine-generated log line from
+// making every viewport redraw scan megabytes of text. The inserted newlines
+// are inside an indented Markdown code block, so they only affect display.
+func wrapCILogLines(text string, limit int) string {
+	if limit < 1 {
+		return text
+	}
+	var wrapped strings.Builder
+	wrapped.Grow(len(text))
+	lineRunes := 0
+	for _, r := range text {
+		if r == '\n' {
+			wrapped.WriteRune(r)
+			lineRunes = 0
+			continue
+		}
+		if lineRunes == limit {
+			wrapped.WriteByte('\n')
+			lineRunes = 0
+		}
+		wrapped.WriteRune(r)
+		lineRunes++
+	}
+	return wrapped.String()
 }
 
 func sanitizeCILog(text string) string {

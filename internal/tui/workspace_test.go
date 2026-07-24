@@ -160,6 +160,7 @@ func (w *fakeWorkspace) Diff(_ context.Context, path string, _ bool) (worktree.D
 func (w *fakeWorkspace) History(context.Context, int) ([]worktree.Commit, error) {
 	return w.history, nil
 }
+func (*fakeWorkspace) CommitPaths(context.Context, string) ([]string, error) { return nil, nil }
 func (w *fakeWorkspace) Branches(context.Context) ([]worktree.Branch, error) {
 	return w.branches, nil
 }
@@ -342,6 +343,67 @@ func TestGraphViewStaysWithinNarrowTerminal(t *testing.T) {
 		if width := lipgloss.Width(line); width > m.width {
 			t.Fatalf("narrow graph row width = %d, want <= %d: %q", width, m.width, ansi.Strip(line))
 		}
+	}
+}
+
+func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active = 4
+	m.width, m.height, m.loadingList = 100, 20, false
+	m.items[provider.Commits] = []provider.Item{
+		{ID: "one", Title: "Fix CAFÉ cafe", Paths: []string{"docs/cafe.md", "main.go"}},
+		{ID: "two", Title: "next", Paths: []string{"next.go"}},
+	}
+	m.graphQuery.SetValue("café")
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "Fix CAFÉ cafe") {
+		t.Fatalf("graph search did not retain case-insensitive Unicode match: %q", view)
+	}
+	m.graphQuery.SetValue("")
+	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = update.(Model)
+	if m.graphDepth != graphFileDepth || m.graphFile != 0 {
+		t.Fatalf("right = depth %v file %d", m.graphDepth, m.graphFile)
+	}
+	update, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = update.(Model)
+	if m.graphFile != 1 {
+		t.Fatalf("down = file %d, want 1", m.graphFile)
+	}
+	update, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = update.(Model)
+	if m.graphDepth != graphCommitDepth || m.cursor[provider.Commits] != 1 {
+		t.Fatalf("last-file down = depth %v cursor %d", m.graphDepth, m.cursor[provider.Commits])
+	}
+}
+
+func TestGraphSearchKeepsResultCursorNavigation(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active, m.width, m.height, m.loadingList = 4, 100, 20, false
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "match first"}, {ID: "two", Title: "match second"}}
+	m.graphQuery.SetValue("match")
+	m.graphQuery.Focus()
+	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = update.(Model)
+	if m.cursor[provider.Commits] != 1 {
+		t.Fatalf("cursor while search is focused = %d, want 1", m.cursor[provider.Commits])
+	}
+}
+
+func TestGraphSearchEnterReturnsToNavigationAndSlashRefocuses(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active, m.width, m.height, m.loadingList = 4, 100, 20, false
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "match"}}
+	m.graphQuery.SetValue("match")
+	m.graphQuery.Focus()
+	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = update.(Model)
+	if m.graphQuery.Focused() {
+		t.Fatal("Enter left graph search focused")
+	}
+	update, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = update.(Model)
+	if !m.graphQuery.Focused() {
+		t.Fatal("slash did not refocus graph search")
 	}
 }
 
@@ -900,6 +962,21 @@ func TestWorkspacePreviewScrollsWithRightPaneMouseWheel(t *testing.T) {
 	m = updated.(Model)
 	if m.workspacePreviewOffset != 0 || m.workspaceCursor != 0 {
 		t.Fatalf("right-pane wheel up: offset=%d cursor=%d", m.workspacePreviewOffset, m.workspaceCursor)
+	}
+}
+
+func TestCoalescedWheelScrollPreservesWorkspacePaneTarget(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
+	m.width, m.height = 100, 12
+	m.workspaceEntries = []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}
+	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("line\n", 40))}
+	leftWidth, _ := m.workspacePaneWidths()
+
+	updated, _ := m.Update(WheelScrollMsg{Delta: 5, X: leftWidth + 4, Y: 6})
+	m = updated.(Model)
+	if m.workspacePreviewOffset != 15 || m.workspaceCursor != 0 {
+		t.Fatalf("right-pane coalesced wheel: offset=%d cursor=%d", m.workspacePreviewOffset, m.workspaceCursor)
 	}
 }
 

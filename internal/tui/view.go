@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
@@ -84,7 +85,13 @@ func (m Model) listView() string {
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
-	if m.remoteErr == nil {
+	if m.remoteErr == nil && m.kind() == provider.Commits {
+		query := m.graphQuery.View()
+		if !m.graphQuery.Focused() && m.graphQuery.Value() == "" {
+			query = metaStyle.Render("Search graph: press / to search")
+		}
+		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
+	} else if m.remoteErr == nil {
 		lines = append(lines, m.filtersView())
 	} else {
 		lines = append(lines, metaStyle.Render(" Remote integration unavailable"))
@@ -94,7 +101,7 @@ func (m Model) listView() string {
 	}
 	lines = append(lines, "")
 
-	items := m.items[m.kind()]
+	items := m.visibleListItems()
 	if m.remoteErr != nil && !m.localGitList(m.kind()) {
 		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.remoteErr.Error()), max(1, m.width-2))))
 	} else if m.loadingList && len(items) == 0 {
@@ -110,7 +117,11 @@ func (m Model) listView() string {
 		showGraph := m.kind() == provider.Commits && hasCommitGraphMetadata(items)
 		for index := start; index < end; index++ {
 			if showGraph {
-				lines = append(lines, m.graphItemRow(items[index], graphPrefixes[index], index == m.cursor[m.kind()]))
+				selected := index == m.cursor[m.kind()]
+				lines = append(lines, m.graphItemRow(items[index], graphPrefixes[index], selected))
+				if selected {
+					lines = append(lines, m.graphFileRows(items[index])...)
+				}
 			} else {
 				lines = append(lines, m.itemRow(items[index], index == m.cursor[m.kind()]))
 			}
@@ -426,26 +437,74 @@ func (m Model) graphItemRow(item provider.Item, graph string, selected bool) str
 			label = "HEAD→" + label
 			style = style.Copy().Bold(true).Foreground(green)
 		}
-		refs = append(refs, style.Render("["+label+"]"))
+		refs = append(refs, style.Render("["+m.highlightGraphMatch(label)+"]"))
 	}
 	prefix := " " + graph + " "
 	refText := strings.Join(refs, " ")
 	meta := strings.TrimSpace(strings.Join([]string{item.Meta, item.Author, relativeTime(item.UpdatedAt)}, " · "))
 	reserved := lipgloss.Width(prefix) + lipgloss.Width(refText) + lipgloss.Width(meta) + 3
-	title := truncate(item.Title, max(1, m.width-reserved))
+	title := m.highlightGraphMatch(truncate(item.Title, max(1, m.width-reserved)))
 	row := prefix
 	if refText != "" {
 		row += refText + " "
 	}
 	row += title
 	if meta != "" {
-		row += " " + metaStyle.Render(meta)
+		row += " " + metaStyle.Render(m.highlightGraphMatch(meta))
 	}
 	row = lipgloss.NewStyle().Width(max(1, m.width)).MaxWidth(max(1, m.width)).Render(row)
 	if selected {
 		return selectedRow.Render(row)
 	}
 	return row
+}
+
+var graphMatchStyle = lipgloss.NewStyle().Background(lipgloss.Color("#625A2D")).Foreground(lipgloss.Color("#FFFFFF"))
+
+// highlightGraphMatch highlights every case-insensitive, non-overlapping match
+// without changing the original text or splitting UTF-8 runes.
+func (m Model) highlightGraphMatch(value string) string {
+	query := strings.TrimSpace(m.graphQuery.Value())
+	if query == "" {
+		return value
+	}
+	valueRunes, queryRunes := []rune(value), []rune(query)
+	for i := range queryRunes {
+		queryRunes[i] = unicode.ToLower(queryRunes[i])
+	}
+	var out strings.Builder
+	for i := 0; i < len(valueRunes); {
+		match := i+len(queryRunes) <= len(valueRunes)
+		for j := range queryRunes {
+			if !match || unicode.ToLower(valueRunes[i+j]) != queryRunes[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			out.WriteString(graphMatchStyle.Render(string(valueRunes[i : i+len(queryRunes)])))
+			i += len(queryRunes)
+			continue
+		}
+		out.WriteRune(valueRunes[i])
+		i++
+	}
+	return out.String()
+}
+
+func (m Model) graphFileRows(item provider.Item) []string {
+	if len(item.Paths) == 0 {
+		return nil
+	}
+	rows := make([]string, 0, len(item.Paths))
+	for i, path := range item.Paths {
+		row := "    " + m.highlightGraphMatch(path)
+		if m.graphDepth == graphFileDepth && i == m.graphFile {
+			row = selectedRow.Render(row)
+		}
+		rows = append(rows, truncate(row, max(1, m.width)))
+	}
+	return rows
 }
 
 func commitGraphPrefixes(items []provider.Item) []string {

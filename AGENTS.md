@@ -1,5 +1,10 @@
 # Repository Agent Instructions
 
+## Installation
+
+- After completing modifications, install the local build as `$HOME/.local/bin/zt-beta` (create `$HOME/.local/bin` if needed). Do not overwrite the regular `zt` installation or install the beta under GOPATH.
+- Use `go build -o "$HOME/.local/bin/zt-beta" ./cmd/zt` so the instruction works on every developer machine without hard-coded user paths.
+
 ## GitHub Issue Management
 
 - Use the GitHub CLI (`gh`) for all issue-management operations, including creating, viewing, searching, editing, commenting on, linking, and closing issues.

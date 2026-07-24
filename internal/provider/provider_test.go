@@ -1081,12 +1081,17 @@ func TestCILogMarkdownIsCodeFormattedAndBounded(t *testing.T) {
 		t.Fatalf("log was not rendered as an indented code block: %q", markdown)
 	}
 	large := bytes.Repeat([]byte("x"), maxCILogBytes+1)
-	if bounded := ciLogMarkdown(large); !strings.Contains(bounded, "Log truncated after 2 MiB") || len(bounded) >= len(large)+100 {
+	maxWrappedBytes := maxCILogBytes + (maxCILogBytes/maxCILogLineRunes+1)*5 + 100
+	if bounded := ciLogMarkdown(large); !strings.Contains(bounded, "Log truncated after 2 MiB") || len(bounded) > maxWrappedBytes {
 		t.Fatalf("large log was not bounded: output bytes=%d", len(bounded))
 	}
 	unsafe := "\x1b]52;c;YXR0YWNr\a\x1b[31mred\x1b[0m\b\x7f\x00"
 	if sanitized := ciLogMarkdown([]byte(unsafe)); sanitized != "    red" {
 		t.Fatalf("terminal control sequences remained in CI log: %q", sanitized)
+	}
+	longLine := strings.Repeat("x", maxCILogLineRunes+1)
+	if wrapped := ciLogMarkdown([]byte(longLine)); wrapped != "    "+strings.Repeat("x", maxCILogLineRunes)+"\n    x" {
+		t.Fatalf("long CI log line was not wrapped: %q", wrapped)
 	}
 }
 

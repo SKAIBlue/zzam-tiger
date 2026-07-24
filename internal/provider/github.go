@@ -51,6 +51,7 @@ func NewGitHub(runner Runner, repo, host string) (*GitHub, error) {
 
 func (g *GitHub) Name() string       { return "GitHub" }
 func (g *GitHub) Repository() string { return g.repo }
+func (g *GitHub) cacheHost() string  { return g.host }
 
 func (g *GitHub) TabName(kind Kind) string {
 	if kind == CIRuns {

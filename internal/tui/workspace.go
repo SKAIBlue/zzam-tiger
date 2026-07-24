@@ -40,6 +40,7 @@ type workspaceClient interface {
 	Commit(context.Context, string) error
 	Diff(context.Context, string, bool) (worktree.Diff, error)
 	History(context.Context, int) ([]worktree.Commit, error)
+	CommitPaths(context.Context, string) ([]string, error)
 	Branches(context.Context) ([]worktree.Branch, error)
 }
 

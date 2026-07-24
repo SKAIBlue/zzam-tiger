@@ -85,9 +85,17 @@ func Detect(requested, repo string, runner Runner) (Provider, error) {
 
 	switch requested {
 	case "github":
-		return NewGitHub(runner, repo, host)
+		value, err := NewGitHub(runner, repo, host)
+		if err != nil {
+			return nil, err
+		}
+		return CachedProvider(value), nil
 	case "gitlab":
-		return NewGitLab(runner, repo, host)
+		value, err := NewGitLab(runner, repo, host)
+		if err != nil {
+			return nil, err
+		}
+		return CachedProvider(value), nil
 	default:
 		return nil, fmt.Errorf("could not detect provider")
 	}

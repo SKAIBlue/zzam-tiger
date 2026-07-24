@@ -50,6 +50,7 @@ func NewGitLab(runner Runner, repo, host string) (*GitLab, error) {
 
 func (g *GitLab) Name() string       { return "GitLab" }
 func (g *GitLab) Repository() string { return g.repo }
+func (g *GitLab) cacheHost() string  { return g.host }
 
 func (g *GitLab) TabName(kind Kind) string {
 	if kind == PullRequests {

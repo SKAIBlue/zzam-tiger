@@ -136,9 +136,12 @@ type Model struct {
 	labels           textinput.Model
 	comment          textarea.Model
 	fileFilter       textinput.Model
+	graphQuery       textinput.Model
 	commitMessage    textinput.Model
 	graphFilter      textinput.Model
 	graphAuthorScope int // 0 all, 1 mine, 2 others
+	graphDepth       graphNavigationDepth
+	graphFile        int
 
 	workspaceEntries         []worktree.Entry
 	workspaceFile            worktree.File
@@ -199,6 +202,20 @@ type Model struct {
 	restartUpdate   restartCommand
 }
 
+type graphNavigationDepth int
+
+const (
+	graphCommitDepth graphNavigationDepth = iota
+	graphFileDepth
+)
+
+// WheelScrollMsg applies coalesced mouse-wheel clicks. A negative delta moves
+// toward the top; a positive delta moves toward the bottom.
+type WheelScrollMsg struct {
+	Delta int
+	X, Y  int
+}
+
 func New(backend provider.Provider, refresh time.Duration) Model {
 	labels := textinput.New()
 	labels.Prompt = "Labels (comma separated): "
@@ -213,6 +230,10 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	fileFilter.Prompt = "Filter files: "
 	fileFilter.Placeholder = "type a path substring"
 	fileFilter.CharLimit = 300
+	graphQuery := textinput.New()
+	graphQuery.Prompt = "Search graph: "
+	graphQuery.Placeholder = "subject, refs, author, or path"
+	graphQuery.CharLimit = 300
 	commitMessage := textinput.New()
 	commitMessage.Placeholder = "Commit message"
 	commitMessage.CharLimit = 1000
@@ -232,6 +253,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		labels:         labels,
 		comment:        comment,
 		fileFilter:     fileFilter,
+		graphQuery:     graphQuery,
 		commitMessage:  commitMessage,
 		graphFilter:    graphFilter,
 		diffLine:       -1,
@@ -485,7 +507,7 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 				}
 				items = append(items, provider.Item{
 					ID: commit.SHA, Title: commit.Subject, State: "commit", Author: commit.Author,
-					AuthorEmail: commit.AuthorEmail, SearchText: search, AssignedToMe: mine, UpdatedAt: commit.AuthoredAt, Meta: shortCommitSHA(commit.SHA), Parents: commit.Parents, Refs: refs,
+					AuthorEmail: commit.AuthorEmail, SearchText: search, AssignedToMe: mine, UpdatedAt: commit.AuthoredAt, Meta: shortCommitSHA(commit.SHA), Parents: commit.Parents, Refs: refs, Paths: commit.Paths,
 				})
 			}
 			return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
@@ -758,7 +780,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			commands = append(commands, tickCmd(m.refresh))
 		}
 		var refreshCmd tea.Cmd
-		if !m.localTab() && m.screen == detailScreen && !m.actionBusy {
+		if !m.localTab() && m.screen == detailScreen && !m.actionBusy && m.shouldAutoRefreshDetail() {
 			m, refreshCmd = m.startDetailLoad()
 		} else if !m.localTab() && m.screen == listScreen && !m.actionBusy {
 			m, refreshCmd = m.startListLoad()
@@ -770,6 +792,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
+
+	case WheelScrollMsg:
+		return m.handleWheelScroll(msg)
 
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
@@ -806,6 +831,22 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// shouldAutoRefreshDetail avoids rebuilding completed CI log views on every
+// polling tick. Completed logs are immutable, while running workflows still
+// need periodic updates. Users can always force a refresh with r.
+func (m Model) shouldAutoRefreshDetail() bool {
+	if m.kind() != provider.CIRuns {
+		return true
+	}
+	state := strings.ToLower(strings.TrimSpace(m.selected.State))
+	switch state {
+	case "queued", "pending", "waiting", "running", "in_progress", "created", "preparing", "scheduled":
+		return true
+	default:
+		return false
+	}
+}
+
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.workspace != nil && m.kind() == provider.Commits && m.graphFilter.Focused() {
 		if msg.String() == "esc" {
@@ -819,6 +860,27 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingList = false
 			return m.startListLoad()
 		}
+		return m, cmd
+	}
+	if m.kind() == provider.Commits && m.graphQuery.Focused() {
+		if msg.String() == "esc" || msg.String() == "enter" {
+			m.graphQuery.Blur()
+			return m, nil
+		}
+		// Keep result navigation available while the search box is active.
+		// Left/right remain available to edit the query.
+		switch msg.String() {
+		case "up", "k":
+			m.moveCursor(-1)
+			return m, nil
+		case "down", "j":
+			m.moveCursor(1)
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.graphQuery, cmd = m.graphQuery.Update(msg)
+		m.cursor[m.kind()], m.offset[m.kind()] = 0, 0
+		m.clampSelection(m.kind())
 		return m, cmd
 	}
 	if m.actionBusy {
@@ -853,6 +915,10 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startActiveTabLoad()
 		}
 	case "left", "h":
+		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
+			m.graphDepth = graphCommitDepth
+			return m, nil
+		}
 		if m.workspace != nil && m.kind() == provider.Commits {
 			m.graphAuthorScope = (m.graphAuthorScope + 2) % 3
 			m.loadingList = false
@@ -860,15 +926,21 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.changeFilter(-1)
 	case "right", "l":
-		if m.workspace != nil && m.kind() == provider.Commits {
-			m.graphAuthorScope = (m.graphAuthorScope + 1) % 3
-			m.loadingList = false
-			return m.startListLoad()
+		if m.kind() == provider.Commits {
+			if item, ok := m.currentListItem(); ok && len(item.Paths) > 0 {
+				m.graphDepth, m.graphFile = graphFileDepth, 0
+			} else {
+				m.status = "no changed files available"
+			}
+			return m, nil
 		}
 		return m.changeFilter(1)
 	case "/":
 		if m.workspace != nil && m.kind() == provider.Commits {
 			return m, m.graphFilter.Focus()
+		}
+		if m.kind() == provider.Commits {
+			return m, m.graphQuery.Focus()
 		}
 	case "o", "p", "z", "Z", "v":
 		if m.workspace != nil && m.kind() == provider.Commits {
@@ -880,8 +952,25 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "up", "k":
+		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
+			if m.graphFile == 0 {
+				m.graphDepth = graphCommitDepth
+			} else {
+				m.graphFile--
+			}
+			return m, nil
+		}
 		m.moveCursor(-1)
 	case "down", "j":
+		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
+			if item, ok := m.currentListItem(); ok && m.graphFile < len(item.Paths)-1 {
+				m.graphFile++
+				return m, nil
+			}
+			m.graphDepth = graphCommitDepth
+			m.moveCursor(1)
+			return m, nil
+		}
 		m.moveCursor(1)
 	case "home":
 		m.cursor[m.kind()] = 0
@@ -893,6 +982,10 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		}
 	case "enter":
+		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
+			m.status = "historical file details are not available yet"
+			return m, nil
+		}
 		return m.openSelected()
 	case "c", "C":
 		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
@@ -923,6 +1016,28 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startListLoad()
 	}
 	return m, nil
+}
+
+func (m Model) visibleListItems() []provider.Item {
+	items := m.items[m.kind()]
+	if m.kind() != provider.Commits || strings.TrimSpace(m.graphQuery.Value()) == "" {
+		return items
+	}
+	query := strings.ToLower(strings.TrimSpace(m.graphQuery.Value()))
+	filtered := make([]provider.Item, 0, len(items))
+	for _, item := range items {
+		values := append([]string{item.Title, item.Meta, item.Author}, item.Paths...)
+		for _, ref := range item.Refs {
+			values = append(values, ref.Name)
+		}
+		for _, value := range values {
+			if strings.Contains(strings.ToLower(value), query) {
+				filtered = append(filtered, item)
+				break
+			}
+		}
+	}
+	return filtered
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1086,7 +1201,7 @@ func diffCommentableKind(kind provider.Kind) bool {
 }
 
 func (m Model) currentListItem() (provider.Item, bool) {
-	items := m.items[m.kind()]
+	items := m.visibleListItems()
 	index := m.cursor[m.kind()]
 	if index < 0 || index >= len(items) {
 		return provider.Item{}, false
@@ -1312,7 +1427,7 @@ func (m Model) changeFilter(delta int) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openSelected() (tea.Model, tea.Cmd) {
-	items := m.items[m.kind()]
+	items := m.visibleListItems()
 	index := m.cursor[m.kind()]
 	if index < 0 || index >= len(items) {
 		return m, nil
@@ -1332,7 +1447,7 @@ func (m Model) openSelected() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) moveCursor(delta int) {
-	items := m.items[m.kind()]
+	items := m.visibleListItems()
 	if len(items) == 0 {
 		return
 	}
@@ -1359,6 +1474,9 @@ func (m *Model) ensureCursorVisible() {
 
 func (m *Model) clampSelection(kind provider.Kind) {
 	items := m.items[kind]
+	if kind == provider.Commits && strings.TrimSpace(m.graphQuery.Value()) != "" {
+		items = m.visibleListItems()
+	}
 	if len(items) == 0 {
 		m.cursor[kind], m.offset[kind] = 0, 0
 		return
@@ -2015,25 +2133,14 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
-	if msg.Button == tea.MouseButtonWheelUp {
-		if m.screen == diffScreen {
-			m.moveDiffLine(-3)
-		} else if m.screen == detailScreen || m.screen == labelScreen {
-			m.viewport.LineUp(3)
-		} else {
-			m.moveCursor(-3)
-		}
+	if msg.Action != tea.MouseActionPress {
 		return m, nil
 	}
+	if msg.Button == tea.MouseButtonWheelUp {
+		return m.handleWheelScroll(WheelScrollMsg{Delta: -1, X: msg.X, Y: msg.Y})
+	}
 	if msg.Button == tea.MouseButtonWheelDown {
-		if m.screen == diffScreen {
-			m.moveDiffLine(3)
-		} else if m.screen == detailScreen || m.screen == labelScreen {
-			m.viewport.LineDown(3)
-		} else {
-			m.moveCursor(3)
-		}
-		return m, nil
+		return m.handleWheelScroll(WheelScrollMsg{Delta: 1, X: msg.X, Y: msg.Y})
 	}
 	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
 		return m, nil
@@ -2055,6 +2162,33 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.cursor[m.kind()] = index
 			return m.openSelected()
 		}
+	}
+	return m, nil
+}
+
+func (m Model) handleWheelScroll(msg WheelScrollMsg) (tea.Model, tea.Cmd) {
+	if msg.Delta == 0 {
+		return m, nil
+	}
+	const linesPerWheelClick = 3
+	lines := msg.Delta * linesPerWheelClick
+	if m.localTab() {
+		leftWidth, _ := m.workspacePaneWidths()
+		if msg.X >= leftWidth+3 {
+			return m.moveWorkspacePreview(lines), nil
+		}
+		return m.moveWorkspaceCursor(lines)
+	}
+	if m.screen == diffScreen {
+		m.moveDiffLine(lines)
+	} else if m.screen == detailScreen || m.screen == labelScreen {
+		if lines < 0 {
+			m.viewport.LineUp(-lines)
+		} else {
+			m.viewport.LineDown(lines)
+		}
+	} else {
+		m.moveCursor(lines)
 	}
 	return m, nil
 }

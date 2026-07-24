@@ -388,6 +388,26 @@ func (c *Client) Revert(ctx context.Context, sha string) error {
 	return c.historyAction(ctx, sha, "revert", "--no-edit", sha)
 }
 
+// CommitPaths returns the paths changed by commit. It uses NUL-delimited output
+// so paths containing whitespace or newlines remain intact.
+func (c *Client) CommitPaths(ctx context.Context, sha string) ([]string, error) {
+	if strings.TrimSpace(sha) == "" {
+		return nil, fmt.Errorf("commit SHA is required")
+	}
+	out, err := c.git(ctx, "show", "--format=", "--name-only", "-z", "--no-renames", sha)
+	if err != nil {
+		return nil, err
+	}
+	paths := splitNUL(out)
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path != "" {
+			result = append(result, path)
+		}
+	}
+	return result, nil
+}
+
 // Branches lists local and remote branches without requiring a hosting CLI.
 func (c *Client) Branches(ctx context.Context) ([]Branch, error) {
 	out, err := c.git(ctx, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(authorname)%00%(authordate:iso-strict)%00%(HEAD)%00", "refs/heads", "refs/remotes")
