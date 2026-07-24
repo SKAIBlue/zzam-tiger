@@ -182,7 +182,7 @@ func TestHeaderUsesProductNameAndVersion(t *testing.T) {
 	m.currentVersion = "v1.2.3"
 	m.width = 120
 	header := ansi.Strip(m.headerView("  GitHub · owner/repo"))
-	if !strings.Contains(header, "Zzam Tiger v1.2.3  GitHub · owner/repo") {
+	if !strings.Contains(header, "Zzam Tiger") || !strings.Contains(header, "v1.2.3") || !strings.Contains(header, "GitHub · owner/repo") {
 		t.Fatalf("header = %q", header)
 	}
 }

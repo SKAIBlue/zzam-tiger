@@ -305,7 +305,7 @@ func TestBranchesListsLocalAndRemoteRefs(t *testing.T) {
 
 func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	when := "2026-07-23T10:20:30+09:00"
-	logOutput := []byte("child\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00" + when + "\x00")
+	logOutput := []byte("\x1echild\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00author@example.com\x00" + when + "\x00old name.txt\x00new name.txt\x00")
 	refsOutput := []byte("child\x00\x00refs/heads/main\x00*\x00\nchild\x00\x00refs/remotes/origin/main\x00 \x00\n" +
 		"child\x00\x00refs/remotes/origin/HEAD\x00 \x00refs/remotes/origin/main\n" +
 		"tag-object\x00child\x00refs/tags/v1.0.0\x00 \x00\n")
@@ -319,16 +319,16 @@ func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	wantTime, _ := time.Parse(time.RFC3339, when)
 	want := []Commit{{
 		SHA: "child", Parents: []string{"parent-a", "parent-b"}, Subject: "subject with spaces",
-		Author: "Test Author", AuthoredAt: wantTime,
+		Author: "Test Author", AuthorEmail: "author@example.com", Paths: []string{"old name.txt", "new name.txt"}, AuthoredAt: wantTime,
 		Refs: []Ref{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}, {Name: "v1.0.0", Tag: true}},
 	}}
 	if !slices.EqualFunc(commits, want, func(a, b Commit) bool {
 		return a.SHA == b.SHA && slices.Equal(a.Parents, b.Parents) && a.Subject == b.Subject &&
-			a.Author == b.Author && a.AuthoredAt.Equal(b.AuthoredAt) && slices.Equal(a.Refs, b.Refs)
+			a.Author == b.Author && a.AuthorEmail == b.AuthorEmail && slices.Equal(a.Paths, b.Paths) && a.AuthoredAt.Equal(b.AuthoredAt) && slices.Equal(a.Refs, b.Refs)
 	}) {
 		t.Fatalf("History() = %#v, want %#v", commits, want)
 	}
-	wantLog := []string{"git", "-C", "/repo", "log", "--all", "--topo-order", "-z", "-n200", "--format=%H%x00%P%x00%s%x00%an%x00%aI"}
+	wantLog := []string{"git", "-C", "/repo", "log", "--all", "--topo-order", "--name-only", "-z", "-n200", "--format=%x1e%H%x00%P%x00%s%x00%an%x00%ae%x00%aI%x00"}
 	wantRefs := []string{"git", "-C", "/repo", "for-each-ref", "--format=%(objectname)%00%(*objectname)%00%(refname)%00%(HEAD)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"}
 	if len(runner.calls) != 2 || !slices.Equal(runner.calls[0], wantLog) || !slices.Equal(runner.calls[1], wantRefs) {
 		t.Fatalf("History commands = %#v", runner.calls)
