@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/charmbracelet/x/ansi v0.10.1
+	github.com/fsnotify/fsnotify v1.9.0
 	golang.org/x/sys v0.36.0
 )
 

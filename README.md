@@ -73,7 +73,7 @@ Open a cloned GitHub or GitLab repository and run:
 zt
 ```
 
-Zzam Tiger automatically detects the hosting provider from `origin`. Run `zt --help` to see provider, repository, and refresh overrides.
+Zzam Tiger automatically detects the hosting provider from `origin`. Local Commit and Files tabs update from filesystem events; `--refresh` controls only remote-provider polling. Run `zt --help` to see provider, repository, and refresh overrides.
 
 ### Recommended Setup: Split Your Terminal
 

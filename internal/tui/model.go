@@ -82,6 +82,19 @@ type actionResultMsg struct {
 
 type tickMsg time.Time
 
+type workspaceWatchMsg struct {
+	path   string
+	err    error
+	closed bool
+}
+
+type workspaceDebounceMsg uint64
+
+type workspaceWatcher interface {
+	Updates() <-chan worktree.WatchUpdate
+	Close() error
+}
+
 type updateResultMsg struct {
 	available bool
 }
@@ -94,6 +107,7 @@ type installCommand func() *exec.Cmd
 type Model struct {
 	backend   provider.Provider
 	workspace workspaceClient
+	watcher   workspaceWatcher
 	refresh   time.Duration
 
 	width  int
@@ -138,6 +152,10 @@ type Model struct {
 	workspaceChangeCollapsed map[string]bool
 	workspaceSplitRatio      float64
 	workspaceDividerDragging bool
+	workspaceWatchGeneration uint64
+	workspaceWatchPending    bool
+	workspaceWatcherErr      error
+	workspaceDebounce        time.Duration
 
 	commentMode      commentMode
 	commentItem      provider.Item
@@ -211,7 +229,14 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 // NewWithWorktree enables the local Files and Commit tabs before the remote
 // provider tabs. New remains available for embedders that only need remote UI.
 func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace *worktree.Client) Model {
-	return newWithWorkspace(backend, refresh, workspace)
+	model := newWithWorkspace(backend, refresh, workspace)
+	watcher, err := worktree.NewWatcher(workspace.Root())
+	if err != nil {
+		model.workspaceWatcherErr = fmt.Errorf("filesystem watcher unavailable (manual refresh remains available): %w", err)
+		return model
+	}
+	model.watcher = watcher
+	return model
 }
 
 // WithUpdates enables the non-blocking release check and installer action.
@@ -235,7 +260,16 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceExpanded = make(map[string]bool)
 	model.workspaceLoaded = make(map[string]bool)
 	model.workspaceChangeCollapsed = make(map[string]bool)
+	model.workspaceDebounce = 150 * time.Millisecond
 	return model
+}
+
+// Close releases filesystem watcher resources. It is safe to call more than once.
+func (m Model) Close() error {
+	if m.watcher != nil {
+		return m.watcher.Close()
+	}
+	return nil
 }
 
 func (m Model) Init() tea.Cmd {
@@ -250,6 +284,9 @@ func (m Model) Init() tea.Cmd {
 		initial = m.fetchListCmd(m.listRequest, m.kind(), m.filter())
 	}
 	commands := []tea.Cmd{initial}
+	if m.watcher != nil {
+		commands = append(commands, waitWorkspaceWatchCmd(m.watcher))
+	}
 	if m.checkUpdate != nil {
 		commands = append(commands, m.checkUpdateCmd())
 	}
@@ -304,6 +341,20 @@ func (m Model) filter() provider.Filter {
 
 func tickCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func waitWorkspaceWatchCmd(watcher workspaceWatcher) tea.Cmd {
+	return func() tea.Msg {
+		update, ok := <-watcher.Updates()
+		if !ok {
+			return workspaceWatchMsg{closed: true}
+		}
+		return workspaceWatchMsg{path: update.Path, err: update.Err}
+	}
+}
+
+func workspaceDebounceCmd(generation uint64, delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(time.Time) tea.Msg { return workspaceDebounceMsg(generation) })
 }
 
 func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.Filter) tea.Cmd {
@@ -417,6 +468,32 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case installFinishedMsg:
 		return m, tea.Quit
 
+	case workspaceWatchMsg:
+		if msg.closed {
+			if m.workspaceWatcherErr == nil {
+				m.workspaceWatcherErr = fmt.Errorf("filesystem watcher stopped (manual refresh remains available)")
+			}
+			return m, nil
+		}
+		commands := []tea.Cmd{waitWorkspaceWatchCmd(m.watcher)}
+		if msg.err != nil {
+			m.workspaceWatcherErr = fmt.Errorf("filesystem watcher error (manual refresh remains available): %w", msg.err)
+			return m, tea.Batch(commands...)
+		}
+		m.workspaceWatchGeneration++
+		commands = append(commands, workspaceDebounceCmd(m.workspaceWatchGeneration, m.workspaceDebounce))
+		return m, tea.Batch(commands...)
+
+	case workspaceDebounceMsg:
+		if uint64(msg) != m.workspaceWatchGeneration || !m.localTab() || m.actionBusy {
+			return m, nil
+		}
+		if m.workspaceLoading {
+			m.workspaceWatchPending = true
+			return m, nil
+		}
+		return m.startWorkspaceLoad()
+
 	case listResultMsg:
 		if m.localTab() || msg.request != m.listRequest || msg.kind != m.kind() || msg.filter != m.filter().Value {
 			return m, nil
@@ -495,12 +572,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			commands = append(commands, tickCmd(m.refresh))
 		}
 		var refreshCmd tea.Cmd
-		if m.localTab() && !m.actionBusy {
-			m.workspaceLoading = false
-			m, refreshCmd = m.startWorkspaceLoad()
-		} else if m.screen == detailScreen && !m.actionBusy {
+		if !m.localTab() && m.screen == detailScreen && !m.actionBusy {
 			m, refreshCmd = m.startDetailLoad()
-		} else if m.screen == listScreen && !m.actionBusy {
+		} else if !m.localTab() && m.screen == listScreen && !m.actionBusy {
 			m, refreshCmd = m.startListLoad()
 		}
 		if refreshCmd != nil {

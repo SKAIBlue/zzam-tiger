@@ -19,7 +19,7 @@ var version = "dev"
 func main() {
 	providerName := flag.String("provider", "auto", "provider: auto, github, or gitlab")
 	repo := flag.String("repo", "", "repository (owner/name or group/project); defaults to the current git repository")
-	refresh := flag.Duration("refresh", 5*time.Second, "automatic refresh interval (0 disables)")
+	refresh := flag.Duration("refresh", 5*time.Second, "remote provider refresh interval (0 disables; local tabs use filesystem events)")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
 
@@ -40,6 +40,7 @@ func main() {
 
 	workspace := worktree.New(".", provider.ExecRunner{})
 	model := tui.NewWithWorktree(backend, *refresh, workspace).WithUpdates(version, updater.CheckLatest, updater.InstallCommand)
+	defer model.Close()
 	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "zt: %v\n", err)

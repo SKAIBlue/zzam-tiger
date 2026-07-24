@@ -856,6 +856,9 @@ func (m Model) statusLine() string {
 	if m.err != nil {
 		return errorStyle.Render(truncate(" Error: "+sanitizeWorkspaceLabel(m.err.Error()), m.width))
 	}
+	if m.workspaceWatcherErr != nil {
+		return errorStyle.Render(truncate(" Error: "+sanitizeWorkspaceLabel(m.workspaceWatcherErr.Error()), m.width))
+	}
 	if m.status != "" {
 		return statusStyle.Render(truncate(" "+m.status, m.width))
 	}
@@ -867,7 +870,11 @@ func (m Model) statusLine() string {
 		if m.screen == listScreen && !m.localTab() && len(m.items[m.kind()]) >= 100 {
 			limit = " · showing latest 100"
 		}
-		return metaStyle.Render(fmt.Sprintf(" Updated %s · auto-refresh %s%s", m.lastUpdated.Format("15:04:05"), refreshLabel(m.refresh), limit))
+		refresh := "local filesystem watch"
+		if !m.localTab() {
+			refresh = "remote auto-refresh " + refreshLabel(m.refresh)
+		}
+		return metaStyle.Render(fmt.Sprintf(" Updated %s · %s%s", m.lastUpdated.Format("15:04:05"), refresh, limit))
 	}
 	return ""
 }

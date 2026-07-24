@@ -33,6 +33,96 @@ type fakeWorkspace struct {
 	history      []worktree.Commit
 }
 
+type fakeWorkspaceWatcher struct {
+	updates chan worktree.WatchUpdate
+	closed  bool
+}
+
+func (w *fakeWorkspaceWatcher) Updates() <-chan worktree.WatchUpdate { return w.updates }
+func (w *fakeWorkspaceWatcher) Close() error {
+	if !w.closed {
+		w.closed = true
+		close(w.updates)
+	}
+	return nil
+}
+
+func TestWorkspaceWatchDebouncesAndSeparatesRemotePolling(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
+	m.workspaceLoading = false
+	m.active = workspaceFilesTab
+
+	updated, cmd := m.Update(workspaceWatchMsg{path: "/repo/file.txt"})
+	m = updated.(Model)
+	if cmd == nil || m.workspaceWatchGeneration != 1 || m.workspaceLoading {
+		t.Fatalf("watch event state: cmd=%v generation=%d loading=%t", cmd != nil, m.workspaceWatchGeneration, m.workspaceLoading)
+	}
+	updated, _ = m.Update(workspaceWatchMsg{path: "/repo/file.txt"})
+	m = updated.(Model)
+	if m.workspaceWatchGeneration != 2 {
+		t.Fatalf("second event generation = %d, want 2", m.workspaceWatchGeneration)
+	}
+	updated, stale := m.Update(workspaceDebounceMsg(1))
+	m = updated.(Model)
+	if stale != nil || m.workspaceLoading {
+		t.Fatal("stale debounce started a workspace load")
+	}
+	updated, load := m.Update(workspaceDebounceMsg(2))
+	m = updated.(Model)
+	if load == nil || !m.workspaceLoading {
+		t.Fatal("latest debounce did not start a workspace load")
+	}
+
+	m.workspaceLoading = false
+	before := m.workspaceRequest
+	updated, tick := m.Update(tickMsg(time.Now()))
+	m = updated.(Model)
+	if m.workspaceRequest != before || m.workspaceLoading || tick == nil {
+		t.Fatalf("local polling tick changed workspace: request=%d before=%d loading=%t tick=%v", m.workspaceRequest, before, m.workspaceLoading, tick != nil)
+	}
+
+	m.active = 2
+	m.loadingList = false
+	updated, remote := m.Update(tickMsg(time.Now()))
+	m = updated.(Model)
+	if remote == nil || !m.loadingList {
+		t.Fatal("remote tab did not retain periodic polling")
+	}
+}
+
+func TestWorkspaceWatchCoalescesEventDuringLoad(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceCommitTab
+	m.workspaceLoading = true
+	m.workspaceRequest = 7
+
+	updated, cmd := m.Update(workspaceDebounceMsg(m.workspaceWatchGeneration))
+	m = updated.(Model)
+	if cmd != nil || !m.workspaceWatchPending {
+		t.Fatal("event during load was not marked pending")
+	}
+	updated, followup := m.Update(workspaceResultMsg{request: 7, op: "status"})
+	m = updated.(Model)
+	if followup == nil || !m.workspaceLoading || m.workspaceWatchPending || m.workspaceRequest != 8 {
+		t.Fatalf("follow-up state: cmd=%v loading=%t pending=%t request=%d", followup != nil, m.workspaceLoading, m.workspaceWatchPending, m.workspaceRequest)
+	}
+}
+
+func TestWorkspaceWatcherErrorsAndCloseRemainSafe(t *testing.T) {
+	watcher := &fakeWorkspaceWatcher{updates: make(chan worktree.WatchUpdate, 1)}
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width = 120
+	m.watcher = watcher
+	updated, _ := m.Update(workspaceWatchMsg{err: context.DeadlineExceeded})
+	m = updated.(Model)
+	if m.workspaceWatcherErr == nil || !strings.Contains(m.statusLine(), "manual refresh") {
+		t.Fatalf("watcher error not visible: %q", m.statusLine())
+	}
+	if err := m.Close(); err != nil || !watcher.closed {
+		t.Fatalf("close state: err=%v closed=%t", err, watcher.closed)
+	}
+}
+
 func (w *fakeWorkspace) Root() string { return "/repo" }
 func (w *fakeWorkspace) Entries(_ context.Context, dir string) ([]worktree.Entry, error) {
 	w.entryDirs = append(w.entryDirs, dir)

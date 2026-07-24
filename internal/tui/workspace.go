@@ -167,6 +167,9 @@ func (m Model) startWorkspaceLoad() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.workspaceLoading = true
+	// Invalidate file/image/diff work started before this workspace snapshot.
+	m.workspacePreviewRequest++
+	m.workspacePreviewLoading = false
 	m.err = nil
 	if m.active == workspaceFilesTab {
 		m.workspaceEntryRequest++
@@ -186,6 +189,15 @@ func (m Model) startWorkspaceLoad() (Model, tea.Cmd) {
 	}
 	m.workspaceRequest++
 	return m, m.fetchWorkspaceCmd(m.workspaceRequest)
+}
+
+func (m Model) finishWorkspaceLoad(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	if m.workspaceLoading || !m.workspaceWatchPending {
+		return m, cmd
+	}
+	m.workspaceWatchPending = false
+	next, refresh := m.startWorkspaceLoad()
+	return next, tea.Batch(cmd, refresh)
 }
 
 func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
@@ -228,7 +240,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 			m.workspaceLoading = false
 		}
 		m.err = msg.err
-		return m, nil
+		return m.finishWorkspaceLoad(nil)
 	}
 	m.err = nil
 	m.lastUpdated = time.Now()
@@ -237,7 +249,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		if msg.dir != "" && !m.workspaceDirectoryExists(msg.dir) {
 			m.workspaceEntryPending = max(0, m.workspaceEntryPending-1)
 			m.workspaceLoading = m.workspaceEntryPending > 0
-			return m, nil
+			return m.finishWorkspaceLoad(nil)
 		}
 		selectedPath := ""
 		selected := m.filteredWorkspaceEntries()
@@ -260,9 +272,10 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		}
 		m.clampWorkspaceCursor(len(entries))
 		if msg.dir == "" {
-			return m.loadSelectedWorkspaceItem()
+			loaded, cmd := m.loadSelectedWorkspaceItem()
+			return loaded.finishWorkspaceLoad(cmd)
 		}
-		return m, nil
+		return m.finishWorkspaceLoad(nil)
 	case "status":
 		if m.active != workspaceCommitTab {
 			return m, nil
@@ -280,7 +293,8 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		}
 		m.clampWorkspaceCursor(len(changes))
 		m.workspaceLoading = false
-		return m.loadSelectedWorkspaceItem()
+		loaded, cmd := m.loadSelectedWorkspaceItem()
+		return loaded.finishWorkspaceLoad(cmd)
 	case "file":
 		if m.active != workspaceFilesTab {
 			return m, nil

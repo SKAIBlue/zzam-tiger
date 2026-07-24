@@ -222,7 +222,11 @@ func (c *Client) Read(ctx context.Context, path string) (File, error) {
 
 // Status returns porcelain status split into staging-oriented groups.
 func (c *Client) Status(ctx context.Context) (Status, error) {
-	out, err := c.git(ctx, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	// Status is invoked in response to index watcher events. Prevent Git's
+	// optional stat-cache refresh from rewriting the index and feeding the
+	// resulting event back into another status scan.
+	out, err := c.runner.Run(ctx, "git", "--no-optional-locks", "-C", c.root,
+		"status", "--porcelain=v1", "-z", "--untracked-files=all")
 	if err != nil {
 		return Status{}, err
 	}
@@ -597,6 +601,10 @@ func parseHistoryRefs(data []byte) (map[string][]Ref, error) {
 }
 
 func detectMIME(path string, data []byte) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".md", ".markdown", ".mdown", ".mkd":
+		return "text/markdown"
+	}
 	if extType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); extType != "" {
 		return strings.Split(extType, ";")[0]
 	}

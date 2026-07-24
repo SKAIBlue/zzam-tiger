@@ -41,6 +41,18 @@ func (r *historyRunner) Run(_ context.Context, name string, args ...string) ([]b
 
 func (*historyRunner) LookPath(string) error { return nil }
 
+func TestStatusDisablesOptionalGitIndexWrites(t *testing.T) {
+	runner := &historyRunner{outputs: [][]byte{nil, nil}}
+	client := New("/repo", runner)
+	if _, err := client.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"git", "--no-optional-locks", "-C", client.Root(), "status", "--porcelain=v1", "-z", "--untracked-files=all"}
+	if len(runner.calls) != 2 || !slices.Equal(runner.calls[1], want) {
+		t.Fatalf("Status command = %#v, want %#v", runner.calls, want)
+	}
+}
+
 func TestEntriesAndRead(t *testing.T) {
 	repo := newRepo(t)
 	writeFile(t, repo, "README.md", []byte("hello\n"))
