@@ -372,6 +372,51 @@ func TestSlashOpensUnifiedSearchAndEnterMovesToResults(t *testing.T) {
 	}
 }
 
+func TestSearchHighlightAppliesToEveryListTab(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kind provider.Kind
+		item provider.Item
+	}{
+		{"pull requests", provider.PullRequests, provider.Item{Title: "Fix CAFÉ search", Meta: "PR-42"}},
+		{"issues", provider.Issues, provider.Item{Title: "Fix CAFÉ search", Meta: "Issue-42"}},
+		{"milestones", provider.Milestones, provider.Item{Title: "Fix CAFÉ search", Meta: "v1"}},
+		{"branches", provider.Branches, provider.Item{Title: "fix/café-search", Meta: "abc1234"}},
+		{"ci runs", provider.CIRuns, provider.Item{Title: "CAFÉ build", Meta: "#42"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(fakeProvider{}, 0)
+			m.width, m.height, m.loadingList = 100, 16, false
+			m.items[tc.kind] = []provider.Item{tc.item}
+			for index, kind := range kinds {
+				if kind == tc.kind {
+					m.active = index
+					break
+				}
+			}
+			m.graphQuery.SetValue("café")
+			view := m.View()
+			if !strings.Contains(view, graphMatchStyle.Render("CAFÉ")) && !strings.Contains(view, graphMatchStyle.Render("café")) {
+				t.Fatalf("search match was not highlighted in %s: %q", tc.name, view)
+			}
+			if got := ansi.Strip(view); !strings.Contains(strings.ToLower(got), "café") {
+				t.Fatalf("highlighting changed rendered text: %q", got)
+			}
+		})
+	}
+}
+
+func TestLocalGraphSearchHighlightUsesGraphFilter(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width, m.height, m.loadingList = 100, 16, false
+	m.active = 2
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "Fix CAFÉ search"}}
+	m.graphFilter.SetValue("café")
+	if view := m.View(); !strings.Contains(view, graphMatchStyle.Render("CAFÉ")) {
+		t.Fatalf("local Graph filter did not highlight its match: %q", view)
+	}
+}
+
 func TestFirstResultUpReturnsToSearchAcrossStandardListTabs(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

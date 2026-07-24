@@ -480,11 +480,11 @@ func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
 		{ID: "one", Title: "Fix CAFÉ cafe", Paths: []string{"docs/cafe.md", "main.go"}},
 		{ID: "two", Title: "next", Paths: []string{"next.go"}},
 	}
-	m.graphQuery.SetValue("café")
+	m.graphFilter.SetValue("café")
 	if view := ansi.Strip(m.View()); !strings.Contains(view, "Fix CAFÉ cafe") {
 		t.Fatalf("graph search did not retain case-insensitive Unicode match: %q", view)
 	}
-	m.graphQuery.SetValue("")
+	m.graphFilter.SetValue("")
 	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = update.(Model)
 	if m.graphDepth != graphFileDepth || m.graphFile != 0 {
@@ -499,6 +499,41 @@ func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
 	m = update.(Model)
 	if m.graphDepth != graphCommitDepth || m.cursor[provider.Commits] != 1 {
 		t.Fatalf("last-file down = depth %v cursor %d", m.graphDepth, m.cursor[provider.Commits])
+	}
+}
+
+func TestWorkspaceSearchHighlightAppliesToFilesAndCommitTabs(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	for _, tc := range []struct {
+		name   string
+		active int
+		setup  func(*Model)
+	}{
+		{
+			name:   "Files",
+			active: workspaceFilesTab,
+			setup: func(m *Model) {
+				m.workspaceEntries = []worktree.Entry{{Path: "CAFÉ.md", Name: "CAFÉ.md"}}
+			},
+		},
+		{
+			name:   "Commit",
+			active: workspaceCommitTab,
+			setup: func(m *Model) {
+				m.workspaceStatus = worktree.Status{Unstaged: []worktree.Change{{Path: "docs/CAFÉ.md", Code: 'M'}}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newWithWorkspace(fakeProvider{}, 0, workspace)
+			m.width, m.height, m.loadingList = 100, 20, false
+			m.active = tc.active
+			tc.setup(&m)
+			m.fileFilter.SetValue("café")
+			if view := m.View(); !strings.Contains(view, graphMatchStyle.Render("CAFÉ")) {
+				t.Fatalf("workspace %s filter did not highlight its match: %q", tc.name, view)
+			}
+		})
 	}
 }
 

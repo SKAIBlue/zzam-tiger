@@ -359,7 +359,8 @@ func (m Model) workspaceList(width, height int) string {
 					icon = "▾"
 				}
 			}
-			row := strings.Repeat("  ", depth) + icon + " " + sanitizeWorkspaceLabel(entry.Name)
+			name := m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(entry.Name))
+			row := strings.Repeat("  ", depth) + icon + " " + name
 			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 			if index == m.workspaceCursor {
 				row = selectedRow.Render(row)
@@ -395,7 +396,8 @@ func (m Model) workspaceList(width, height int) string {
 		if name == "" {
 			name = item.displayPath()
 		}
-		row := fmt.Sprintf("  %s %s%s %s", badge, strings.Repeat("  ", item.depth), icon, sanitizeWorkspaceLabel(name))
+		name = m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(name))
+		row := fmt.Sprintf("  %s %s%s %s", badge, strings.Repeat("  ", item.depth), icon, name)
 		row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 		if display.index == m.workspaceCursor {
 			row = selectedRow.Render(row)
@@ -446,13 +448,13 @@ func (m Model) itemRow(item provider.Item, selected bool) string {
 	if metaWidth > 0 {
 		titleWidth--
 	}
-	title := truncate(item.Title, titleWidth)
+	title := m.highlightSearchMatch(truncate(item.Title, titleWidth))
 	if item.AssignedToMe {
 		title = myAssignmentTitle.Render(title)
 	}
 	row := prefix + title
 	if metaWidth > 0 {
-		row += " " + metaStyle.Render(truncate(meta, metaWidth))
+		row += " " + metaStyle.Render(m.highlightSearchMatch(truncate(meta, metaWidth)))
 	}
 	row = lipgloss.NewStyle().Width(max(1, m.width)).Render(row)
 	if selected {
@@ -476,20 +478,20 @@ func (m Model) graphItemRow(item provider.Item, graph string, selected bool) str
 			label = "HEAD→" + label
 			style = style.Copy().Bold(true).Foreground(green)
 		}
-		refs = append(refs, style.Render("["+m.highlightGraphMatch(label)+"]"))
+		refs = append(refs, style.Render("["+m.highlightSearchMatch(label)+"]"))
 	}
 	prefix := " " + graph + " "
 	refText := strings.Join(refs, " ")
 	meta := strings.TrimSpace(strings.Join([]string{item.Meta, item.Author, relativeTime(item.UpdatedAt)}, " · "))
 	reserved := lipgloss.Width(prefix) + lipgloss.Width(refText) + lipgloss.Width(meta) + 3
-	title := m.highlightGraphMatch(truncate(item.Title, max(1, m.width-reserved)))
+	title := m.highlightSearchMatch(truncate(item.Title, max(1, m.width-reserved)))
 	row := prefix
 	if refText != "" {
 		row += refText + " "
 	}
 	row += title
 	if meta != "" {
-		row += " " + metaStyle.Render(m.highlightGraphMatch(meta))
+		row += " " + metaStyle.Render(m.highlightSearchMatch(meta))
 	}
 	row = lipgloss.NewStyle().Width(max(1, m.width)).MaxWidth(max(1, m.width)).Render(row)
 	if selected {
@@ -500,10 +502,21 @@ func (m Model) graphItemRow(item provider.Item, graph string, selected bool) str
 
 var graphMatchStyle = lipgloss.NewStyle().Background(lipgloss.Color("#625A2D")).Foreground(lipgloss.Color("#FFFFFF"))
 
-// highlightGraphMatch highlights every case-insensitive, non-overlapping match
-// without changing the original text or splitting UTF-8 runes.
-func (m Model) highlightGraphMatch(value string) string {
-	query := strings.TrimSpace(m.graphQuery.Value())
+// highlightSearchMatch highlights every case-insensitive, non-overlapping
+// match in a visible list field without changing the original text or
+// splitting UTF-8 runes. It is shared by Graph and every other list tab.
+func (m Model) highlightSearchMatch(value string) string {
+	return highlightMatch(value, m.activeListSearchQuery())
+}
+
+// highlightWorkspaceMatch applies the Files/Commit path filter to the local
+// workspace rows, which do not use a provider list kind.
+func (m Model) highlightWorkspaceMatch(value string) string {
+	return highlightMatch(value, m.fileFilter.Value())
+}
+
+func highlightMatch(value, query string) string {
+	query = strings.TrimSpace(query)
 	if query == "" {
 		return value
 	}
@@ -537,7 +550,7 @@ func (m Model) graphFileRows(item provider.Item) []string {
 	}
 	rows := make([]string, 0, len(item.Paths))
 	for i, path := range item.Paths {
-		row := "    " + m.highlightGraphMatch(path)
+		row := "    " + m.highlightSearchMatch(path)
 		if m.graphDepth == graphFileDepth && i == m.graphFile {
 			row = selectedRow.Render(row)
 		}

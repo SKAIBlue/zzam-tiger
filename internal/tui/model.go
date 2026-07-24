@@ -1302,7 +1302,7 @@ func (m Model) startBranchAction(action string, item provider.Item) (tea.Model, 
 
 func (m Model) visibleListItems() []provider.Item {
 	items := m.items[m.kind()]
-	query := strings.ToLower(strings.TrimSpace(m.graphQuery.Value()))
+	query := strings.ToLower(m.activeListSearchQuery())
 	if query == "" {
 		return items
 	}
@@ -1320,6 +1320,16 @@ func (m Model) visibleListItems() []provider.Item {
 		}
 	}
 	return filtered
+}
+
+// activeListSearchQuery returns the input that controls the visible items in
+// the active tab. Local Graph has its own filter because it is evaluated while
+// loading history; every other list tab shares the global list search.
+func (m Model) activeListSearchQuery() string {
+	if m.workspace != nil && m.kind() == provider.Commits {
+		return strings.TrimSpace(m.graphFilter.Value())
+	}
+	return strings.TrimSpace(m.graphQuery.Value())
 }
 
 func filterBranchItems(items []provider.Item, scope string) []provider.Item {
@@ -1763,7 +1773,7 @@ func (m *Model) ensureCursorVisible() {
 
 func (m *Model) clampSelection(kind provider.Kind) {
 	items := m.items[kind]
-	if kind == provider.Commits && strings.TrimSpace(m.graphQuery.Value()) != "" {
+	if kind == m.kind() && m.activeListSearchQuery() != "" {
 		items = m.visibleListItems()
 	}
 	if len(items) == 0 {
