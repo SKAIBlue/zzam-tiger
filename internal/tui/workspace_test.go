@@ -298,6 +298,36 @@ func TestBranchesAlwaysUseLocalGitRefs(t *testing.T) {
 	}
 }
 
+func TestBranchFiltersScopeLocalAndRemoteRefs(t *testing.T) {
+	workspace := &fakeWorkspace{branches: []worktree.Branch{{Name: "main"}, {Name: "origin/main", Remote: true}}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace).WithRemoteUnavailable(errors.New("gh missing"))
+	m.active = 3 // Branches when only local Git tabs are available.
+
+	if got := m.filters(); len(got) != 3 || got[0].Value != "all" || got[1].Value != "local" || got[2].Value != "remote" {
+		t.Fatalf("branch filters = %#v", got)
+	}
+
+	updated, cmd := m.changeFilter(1)
+	m = updated.(Model)
+	if cmd == nil || m.filter().Value != "local" {
+		t.Fatalf("local filter change: cmd=%v filter=%#v", cmd != nil, m.filter())
+	}
+	result := cmd().(listResultMsg)
+	if len(result.items) != 1 || result.items[0].ID != "main" || result.items[0].State != "local" {
+		t.Fatalf("local branch items = %#v", result.items)
+	}
+
+	updated, cmd = m.changeFilter(1)
+	m = updated.(Model)
+	if cmd == nil || m.filter().Value != "remote" {
+		t.Fatalf("remote filter change: cmd=%v filter=%#v", cmd != nil, m.filter())
+	}
+	result = cmd().(listResultMsg)
+	if len(result.items) != 1 || result.items[0].ID != "origin/main" || result.items[0].State != "remote" {
+		t.Fatalf("remote branch items = %#v", result.items)
+	}
+}
+
 func TestUnavailableProviderRendersLocalGraphAndRemoteHeaderWarning(t *testing.T) {
 	m := newWithWorkspace(nil, 0, &fakeWorkspace{}).WithRemoteUnavailable(errors.New("gh missing"))
 	m.active = 2 // Graph after Commit and Files.
@@ -472,7 +502,139 @@ func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
 	}
 }
 
-func TestGraphSearchKeepsResultCursorNavigation(t *testing.T) {
+func TestArrowFocusFlowAcrossTabsGraphAndWorkspacePreview(t *testing.T) {
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.width, m.height, m.loadingList = 100, 20, false
+	m.active = 2 // Graph follows Commit and Files.
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "first", Paths: []string{"one.go"}}}
+	graphView := ansi.Strip(m.View())
+	if !strings.Contains(graphView, "Zzam Tiger") || !strings.Contains(graphView, "Graph") || !strings.Contains(graphView, "All") || !strings.Contains(graphView, "Search:") {
+		t.Fatalf("Graph lost its title, scope status, or search row: %q", graphView)
+	}
+	if rawGraphView := m.View(); strings.Contains(rawGraphView, "\x1b_Ga=d") {
+		t.Fatalf("Graph view must not emit Kitty image cleanup: %q", rawGraphView)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusGraphFilters {
+		t.Fatalf("tab down focus = %v, want graph filters", m.focus)
+	}
+	m.graphFilter.Focus()
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.focus != focusTabs || m.graphFilter.Focused() {
+		t.Fatalf("search up did not return to tabs: focus=%v input=%t", m.focus, m.graphFilter.Focused())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusGraphCommits {
+		t.Fatalf("filter down focus = %v, want graph commits", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.focus != focusGraphFilters || !m.graphFilter.Focused() {
+		t.Fatalf("first commit up did not focus Graph search: focus=%v input=%t", m.focus, m.graphFilter.Focused())
+	}
+	m.graphFilter.Blur()
+	m.focus, m.graphDepth, m.graphFile = focusListItems, graphFileDepth, 0
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.focus != focusGraphFilters || !m.graphFilter.Focused() || m.graphDepth != graphCommitDepth {
+		t.Fatalf("first Graph file up did not focus search: focus=%v input=%t depth=%v", m.focus, m.graphFilter.Focused(), m.graphDepth)
+	}
+
+	m.active = workspaceCommitTab
+	m.focus = focusTabs
+	m.workspaceStatus = worktree.Status{Unstaged: []worktree.Change{{Path: "one.go", Code: 'M'}}}
+	m.workspaceDiffRows = strings.Split("header\n"+strings.Repeat("changed line\n", 30), "\n")
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusFileFilter || !m.fileFilter.Focused() {
+		t.Fatalf("commit tab down did not focus search: focus=%v input=%t", m.focus, m.fileFilter.Focused())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusCommitMessage || !m.commitMessage.Focused() {
+		t.Fatalf("search down did not focus message: focus=%v input=%t", m.focus, m.commitMessage.Focused())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusWorkspaceList {
+		t.Fatalf("message down focus = %v, want file list", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.focus != focusWorkspacePreview {
+		t.Fatalf("file right focus = %v, want preview", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+	if m.focus != focusWorkspaceList {
+		t.Fatalf("preview left focus = %v, want file list", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.workspacePreviewOffset == 0 {
+		t.Fatal("preview down did not scroll")
+	}
+	m.workspacePreviewOffset = 0
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.focus != focusCommitMessage || !m.commitMessage.Focused() {
+		t.Fatalf("preview-top up did not return to message: focus=%v input=%t", m.focus, m.commitMessage.Focused())
+	}
+}
+
+func TestArrowTabSwitchingIsIsolatedToTabFocus(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width, m.height = 100, 20
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.active != workspaceFilesTab || m.focus != focusTabs {
+		t.Fatalf("tab-right active=%d focus=%v", m.active, m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	active := m.active
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.active != active {
+		t.Fatalf("right outside tab focus switched tabs: %d -> %d", active, m.active)
+	}
+}
+
+func TestBranchTabFocusUsesLeftAndRightToSwitchTabs(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width, m.height = 100, 20
+	m.active = 3 // Commit, Files, Graph, Branches.
+	m.focus = focusTabs
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+	if m.active != 2 || m.focus != focusTabs {
+		t.Fatalf("branch-tab left active=%d focus=%v, want Graph tab focus", m.active, m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.active != 3 || m.focus != focusTabs {
+		t.Fatalf("graph-tab right active=%d focus=%v, want Branches tab focus", m.active, m.focus)
+	}
+	for want := 4; want < m.tabCount(); want++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		m = updated.(Model)
+		if m.active != want || m.focus != focusTabs {
+			t.Fatalf("right tab %d active=%d focus=%v", want, m.active, m.focus)
+		}
+	}
+}
+
+func TestGraphSearchDownLeavesInputForResultNavigation(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.active, m.width, m.height, m.loadingList = 4, 100, 20, false
 	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "match first"}, {ID: "two", Title: "match second"}}
@@ -480,8 +642,8 @@ func TestGraphSearchKeepsResultCursorNavigation(t *testing.T) {
 	m.graphQuery.Focus()
 	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = update.(Model)
-	if m.cursor[provider.Commits] != 1 {
-		t.Fatalf("cursor while search is focused = %d, want 1", m.cursor[provider.Commits])
+	if m.graphQuery.Focused() || m.focus != focusListItems || m.cursor[provider.Commits] != 0 {
+		t.Fatalf("down did not leave search for results: input=%t focus=%v cursor=%d", m.graphQuery.Focused(), m.focus, m.cursor[provider.Commits])
 	}
 }
 

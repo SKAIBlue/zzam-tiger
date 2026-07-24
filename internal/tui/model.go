@@ -20,6 +20,23 @@ import (
 
 type screen int
 
+// focusRegion identifies the part of the list UI that owns directional keys.
+// Keeping this independent from cursors and text-input focus prevents a list
+// selection or a preview offset from accidentally changing tabs.
+type focusRegion int
+
+const (
+	focusTabs focusRegion = iota
+	focusGraphFilters
+	focusGraphCommits
+	focusCommitMessage
+	focusFileFilter
+	focusWorkspaceList
+	focusWorkspacePreview
+	focusListSearch
+	focusListItems
+)
+
 const (
 	workspaceCommitTab = iota
 	workspaceFilesTab
@@ -126,6 +143,7 @@ type Model struct {
 	height int
 	screen screen
 	active int
+	focus  focusRegion
 
 	filterIndex map[provider.Kind]int
 	items       map[provider.Kind][]provider.Item
@@ -141,7 +159,7 @@ type Model struct {
 	branchTarget     provider.Item
 	comment          textarea.Model
 	fileFilter       textinput.Model
-	graphQuery       textinput.Model
+	graphQuery       textinput.Model // shared Search input for non-workspace tabs
 	commitMessage    textinput.Model
 	graphFilter      textinput.Model
 	graphAuthorScope int // 0 all, 1 mine, 2 others
@@ -235,12 +253,12 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	comment.SetWidth(66)
 	comment.SetHeight(8)
 	fileFilter := textinput.New()
-	fileFilter.Prompt = "Filter files: "
-	fileFilter.Placeholder = "type a path substring"
+	fileFilter.Prompt = "Search: "
+	fileFilter.Placeholder = "type to filter files"
 	fileFilter.CharLimit = 300
 	graphQuery := textinput.New()
-	graphQuery.Prompt = "Search graph: "
-	graphQuery.Placeholder = "subject, refs, author, or path"
+	graphQuery.Prompt = "Search: "
+	graphQuery.Placeholder = "type to filter"
 	graphQuery.CharLimit = 300
 	commitMessage := textinput.New()
 	commitMessage.Placeholder = "Commit message"
@@ -265,6 +283,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		graphQuery:     graphQuery,
 		commitMessage:  commitMessage,
 		graphFilter:    graphFilter,
+		focus:          focusListItems,
 		diffLine:       -1,
 		diffAnchor:     -1,
 		selectedReview: -1,
@@ -338,6 +357,7 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceLoaded = make(map[string]bool)
 	model.workspaceChangeCollapsed = make(map[string]bool)
 	model.workspaceDebounce = 150 * time.Millisecond
+	model.focus = focusTabs
 	return model
 }
 
@@ -442,15 +462,32 @@ func (m Model) tabCount() int {
 }
 
 func (m Model) filter() provider.Filter {
-	if m.remoteErr != nil {
+	filters := m.filters()
+	if len(filters) == 0 {
 		return provider.Filter{}
 	}
-	filters := m.backend.Filters(m.kind())
 	index := m.filterIndex[m.kind()]
 	if index < 0 || index >= len(filters) {
 		index = 0
 	}
 	return filters[index]
+}
+
+// filters returns the scopes available for the active list. Branches are
+// always obtained from local Git, so their local/remote scope must not depend
+// on an available hosting-provider integration.
+func (m Model) filters() []provider.Filter {
+	if m.workspace != nil && m.kind() == provider.Branches {
+		return []provider.Filter{
+			{Label: "All", Value: "all"},
+			{Label: "Local", Value: "local"},
+			{Label: "Remote", Value: "remote"},
+		}
+	}
+	if m.remoteErr != nil || m.backend == nil {
+		return nil
+	}
+	return m.backend.Filters(m.kind())
 }
 
 func tickCmd(interval time.Duration) tea.Cmd {
@@ -493,6 +530,9 @@ func (m Model) fetchListCmd(request uint64, kind provider.Kind, filter provider.
 						meta = "HEAD · " + meta
 					}
 					items = append(items, provider.Item{ID: branch.Name, Title: branch.Name, State: state, Author: branch.Author, UpdatedAt: branch.UpdatedAt, Meta: meta})
+				}
+				if filter.Value != "all" && filter.Value != "" {
+					items = filterBranchItems(items, filter.Value)
 				}
 				return listResultMsg{request: request, kind: kind, filter: filter.Value, items: items, err: err}
 			}
@@ -836,6 +876,34 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == diffScreen {
 			return m.updateDiff(msg)
 		}
+		// Search is a global list-screen destination. It intentionally wins over
+		// local shortcuts so users never need to remember which region owns it.
+		if msg.String() == "/" {
+			if m.localTab() {
+				m.focus = focusFileFilter
+				return m, m.fileFilter.Focus()
+			}
+			if m.workspace != nil && m.kind() == provider.Commits {
+				m.focus = focusGraphFilters
+				return m, m.graphFilter.Focus()
+			}
+			m.focus = focusListSearch
+			return m, m.graphQuery.Focus()
+		}
+		// Tab-bar arrows are global once the tab bar owns focus. Keeping this at
+		// the top level prevents individual tab handlers from drifting apart.
+		if m.focus == focusTabs {
+			switch msg.String() {
+			case "left":
+				m.active = (m.active - 1 + m.tabCount()) % m.tabCount()
+				m.status = ""
+				return m.startActiveTabLoad()
+			case "right":
+				m.active = (m.active + 1) % m.tabCount()
+				m.status = ""
+				return m.startActiveTabLoad()
+			}
+		}
 		if m.localTab() {
 			return m.updateWorkspace(msg)
 		}
@@ -875,6 +943,76 @@ func (m Model) shouldAutoRefreshDetail() bool {
 }
 
 func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Graph can be reached through keyboard and mouse paths. Treat every first
+	// commit boundary alike, even if a prior interaction left generic list focus
+	// or the changed-file subdepth active.
+	if m.workspace != nil && !m.localTab() && m.kind() == provider.Commits &&
+		(msg.String() == "up") && m.cursor[provider.Commits] == 0 &&
+		(m.focus == focusGraphCommits || m.focus == focusListItems) {
+		m.graphDepth, m.graphFile = graphCommitDepth, 0
+		m.focus = focusGraphFilters
+		return m, m.graphFilter.Focus()
+	}
+	// Standard list tabs share the reverse boundary: the first result returns
+	// to Search. Graph and workspace lists have their own intermediate regions.
+	if m.focus == focusListItems && m.kind() != provider.Commits && msg.String() == "up" && m.cursor[m.kind()] == 0 {
+		m.focus = focusListSearch
+		return m, m.graphQuery.Focus()
+	}
+	// Every non-workspace list tab shares tab-bar ownership. Graph adds an
+	// intermediate filter region below, while the other tabs enter Search.
+	if m.workspace != nil && m.focus == focusTabs && !(m.workspace != nil && !m.localTab() && m.kind() == provider.Commits) {
+		switch msg.String() {
+		case "left":
+			m.active = (m.active - 1 + m.tabCount()) % m.tabCount()
+			return m.startActiveTabLoad()
+		case "right":
+			m.active = (m.active + 1) % m.tabCount()
+			return m.startActiveTabLoad()
+		case "down":
+			m.focus = focusListSearch
+			return m, m.graphQuery.Focus()
+		}
+	}
+	if m.workspace != nil && !m.localTab() && m.kind() == provider.Commits {
+		key := msg.String()
+		switch m.focus {
+		case focusTabs:
+			switch key {
+			case "left":
+				m.active = (m.active - 1 + m.tabCount()) % m.tabCount()
+				return m.startActiveTabLoad()
+			case "right":
+				m.active = (m.active + 1) % m.tabCount()
+				return m.startActiveTabLoad()
+			case "down", "enter":
+				m.focus = focusGraphFilters
+				return m, m.graphFilter.Focus()
+			}
+		case focusGraphFilters:
+			switch key {
+			case "up":
+				m.graphFilter.Blur()
+				m.focus = focusTabs
+				return m, nil
+			case "left", "right":
+				if !m.graphFilter.Focused() {
+					delta := 1
+					if key == "left" {
+						delta = 2
+					}
+					m.graphAuthorScope = (m.graphAuthorScope + delta) % 3
+					m.loadingList = false
+					return m.startListLoad()
+				}
+			case "down", "enter":
+				m.graphFilter.Blur()
+				m.focus = focusGraphCommits
+				return m, nil
+			}
+		case focusGraphCommits:
+		}
+	}
 	if m.workspace != nil && m.kind() == provider.Commits && m.graphFilter.Focused() {
 		if msg.String() == "esc" {
 			m.graphFilter.Blur()
@@ -889,19 +1027,15 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
-	if m.kind() == provider.Commits && m.graphQuery.Focused() {
-		if msg.String() == "esc" || msg.String() == "enter" {
+	if m.graphQuery.Focused() {
+		if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "down" {
 			m.graphQuery.Blur()
+			m.focus = focusListItems
 			return m, nil
 		}
-		// Keep result navigation available while the search box is active.
-		// Left/right remain available to edit the query.
-		switch msg.String() {
-		case "up", "k":
-			m.moveCursor(-1)
-			return m, nil
-		case "down", "j":
-			m.moveCursor(1)
+		if msg.String() == "up" {
+			m.graphQuery.Blur()
+			m.focus = focusTabs
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -964,6 +1098,7 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.changeFilter(1)
 	case "/":
 		if m.workspace != nil && m.kind() == provider.Commits {
+			m.focus = focusGraphFilters
 			return m, m.graphFilter.Focus()
 		}
 		if m.kind() == provider.Commits {
@@ -1167,13 +1302,13 @@ func (m Model) startBranchAction(action string, item provider.Item) (tea.Model, 
 
 func (m Model) visibleListItems() []provider.Item {
 	items := m.items[m.kind()]
-	if m.kind() != provider.Commits || strings.TrimSpace(m.graphQuery.Value()) == "" {
+	query := strings.ToLower(strings.TrimSpace(m.graphQuery.Value()))
+	if query == "" {
 		return items
 	}
-	query := strings.ToLower(strings.TrimSpace(m.graphQuery.Value()))
 	filtered := make([]provider.Item, 0, len(items))
 	for _, item := range items {
-		values := append([]string{item.Title, item.Meta, item.Author}, item.Paths...)
+		values := append([]string{item.ID, item.Title, item.Meta, item.Author, item.AuthorEmail, item.State, item.SearchText}, item.Paths...)
 		for _, ref := range item.Refs {
 			values = append(values, ref.Name)
 		}
@@ -1182,6 +1317,16 @@ func (m Model) visibleListItems() []provider.Item {
 				filtered = append(filtered, item)
 				break
 			}
+		}
+	}
+	return filtered
+}
+
+func filterBranchItems(items []provider.Item, scope string) []provider.Item {
+	filtered := make([]provider.Item, 0, len(items))
+	for _, item := range items {
+		if item.State == scope {
+			filtered = append(filtered, item)
 		}
 	}
 	return filtered
@@ -1558,10 +1703,7 @@ func splitLabels(value string) []string {
 }
 
 func (m Model) changeFilter(delta int) (tea.Model, tea.Cmd) {
-	if m.remoteErr != nil {
-		return m, nil
-	}
-	filters := m.backend.Filters(m.kind())
+	filters := m.filters()
 	if len(filters) <= 1 {
 		return m, nil
 	}
@@ -1635,7 +1777,11 @@ func (m *Model) clampSelection(kind provider.Kind) {
 }
 
 func (m Model) listHeight() int {
-	height := m.height - 7
+	// Header, tabs, separator, Search, filters, spacer, status, and help.
+	height := m.height - 8
+	if m.remoteErr != nil && m.workspace != nil && m.kind() == provider.Branches {
+		height-- // The local Branches list also keeps the remote-unavailable notice.
+	}
 	if height < 1 {
 		return 1
 	}
@@ -1659,6 +1805,8 @@ func (m *Model) resizeViewport() {
 	m.comment.SetWidth(min(66, max(20, width-8)))
 	m.comment.SetHeight(min(7, max(3, height/4)))
 	m.fileFilter.Width = max(10, m.width-16)
+	m.graphQuery.Width = max(10, m.width-10)
+	m.graphFilter.Width = max(10, m.width-10)
 }
 
 func (m *Model) setDetailContent() {
@@ -2422,11 +2570,11 @@ func (m Model) tabLabels() []string {
 }
 
 func (m Model) filterAt(x int) int {
-	if m.remoteErr != nil {
+	if m.remoteErr != nil && !(m.workspace != nil && m.kind() == provider.Branches) {
 		return -1
 	}
 	position := 1
-	for index, filter := range m.backend.Filters(m.kind()) {
+	for index, filter := range m.filters() {
 		label := " " + filter.Label + " "
 		end := position + lipgloss.Width(label)
 		if x >= position && x < end {

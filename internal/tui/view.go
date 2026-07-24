@@ -84,19 +84,30 @@ func (m Model) listView() string {
 	lines := make([]string, 0, m.height)
 	title := "  remote unavailable"
 	if m.backend != nil {
-		title = fmt.Sprintf("  %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()))
+		title = fmt.Sprintf("  %s · %s · %s", sanitizeWorkspaceLabel(m.backend.Name()), sanitizeWorkspaceLabel(m.backend.Repository()), m.activeTabLabel())
 	}
+	// List views do not render Kitty images. In particular, emitting an image
+	// delete command here makes Kitty consume the title row on some terminals.
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
 	lines = append(lines, strings.Repeat("─", max(1, m.width)))
-	if m.remoteErr == nil && m.kind() == provider.Commits {
-		query := m.graphQuery.View()
-		if !m.graphQuery.Focused() && m.graphQuery.Value() == "" {
-			query = metaStyle.Render("Search graph: press / to search")
+	if m.remoteErr == nil && m.workspace != nil && m.kind() == provider.Commits {
+		query := m.graphFilter.View()
+		if !m.graphFilter.Focused() && m.graphFilter.Value() == "" {
+			query = metaStyle.Render("Search: press / to search")
 		}
 		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
-	} else if m.remoteErr == nil {
 		lines = append(lines, m.filtersView())
+	} else if m.remoteErr == nil || m.workspace != nil && m.kind() == provider.Branches {
+		query := m.graphQuery.View()
+		if !m.graphQuery.Focused() && m.graphQuery.Value() == "" {
+			query = metaStyle.Render("Search: press / to search")
+		}
+		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
+		lines = append(lines, m.filtersView())
+		if m.remoteErr != nil {
+			lines = append(lines, metaStyle.Render(" Remote integration unavailable"))
+		}
 	} else {
 		lines = append(lines, metaStyle.Render(" Remote integration unavailable"))
 	}
@@ -139,6 +150,14 @@ func (m Model) listView() string {
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
 }
 
+func (m Model) activeTabLabel() string {
+	labels := m.tabLabels()
+	if m.active < 0 || m.active >= len(labels) {
+		return ""
+	}
+	return labels[m.active]
+}
+
 func hasCommitGraphMetadata(items []provider.Item) bool {
 	for _, item := range items {
 		if len(item.Parents)+len(item.Refs) > 0 {
@@ -156,7 +175,11 @@ func (m Model) tabsView() string {
 		name := labels[index]
 		label := fmt.Sprintf(" %d %s ", index+1, name)
 		if index == m.active {
-			parts = append(parts, activeTab.Render(label))
+			style := activeTab
+			if m.focus == focusTabs {
+				style = style.Copy().Underline(true)
+			}
+			parts = append(parts, style.Render(label))
 		} else {
 			parts = append(parts, tabStyle.Render(label))
 		}
@@ -168,7 +191,7 @@ func (m Model) tabsView() string {
 	if end < len(labels) {
 		trailing = metaStyle.Render(" ›")
 	}
-	return kittyDeleteImage() + leading + strings.Join(parts, " ") + trailing
+	return leading + strings.Join(parts, " ") + trailing
 }
 
 func (m Model) workspaceView() string {
@@ -187,7 +210,7 @@ func (m Model) workspaceView() string {
 		if value == "" {
 			value = metaStyle.Render("press / to filter paths")
 		}
-		filter = "Filter files: " + value
+		filter = "Search: " + value
 	}
 	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
 	if m.workspaceCommitActive() {
@@ -219,12 +242,32 @@ func (m Model) workspaceView() string {
 		lines = append(lines, "")
 	}
 	lines = append(lines, m.statusLine())
-	help := " ↑/↓ select · Enter/→ expand · ← collapse · drag divider resize · PgUp/PgDn preview · / filter"
-	if m.workspaceCommitActive() {
-		help = " c message · Enter commit · drag divider resize · ↑/↓ select · Space toggle · s/u file or folder · S/U all · / filter"
-	}
+	help := m.workspaceFocusHelp()
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) workspaceFocusHelp() string {
+	switch m.focus {
+	case focusTabs:
+		return "Tabs focused · ←/→ switch tabs · ↓ enter content"
+	case focusCommitMessage:
+		return "Commit message focused · type to edit · ↓ changed files · Enter commit"
+	case focusFileFilter:
+		if m.workspaceCommitActive() {
+			return "Search focused · type to filter files · ↓ commit message"
+		}
+		return "File filter focused · type to edit · ↓ file list"
+	case focusWorkspacePreview:
+		return "Preview focused · ← file list · ↑/↓ scroll · ↑ at top returns to input"
+	case focusWorkspaceList:
+		if m.workspaceCommitActive() {
+			return "Changed files focused · ↑/↓ select · → preview · Space stage · Enter expand"
+		}
+		return "File list focused · ↑/↓ select · → preview · Enter expand"
+	default:
+		return "↓ move focus"
+	}
 }
 
 func (m Model) workspaceDividerView(height int) string {
@@ -368,17 +411,9 @@ func (m Model) workspaceList(width, height int) string {
 func (m Model) filtersView() string {
 	if m.workspace != nil && m.kind() == provider.Commits {
 		scopes := []string{"All", "Mine", "Others"}
-		query := m.graphFilter.View()
-		if !m.graphFilter.Focused() {
-			if value := m.graphFilter.Value(); value != "" {
-				query = "Search commits: " + value
-			} else {
-				query = "Search commits: press /"
-			}
-		}
-		return " " + activeFilter.Render(" "+scopes[m.graphAuthorScope]+" ") + "  " + query
+		return " " + activeFilter.Render(" "+scopes[m.graphAuthorScope]+" ")
 	}
-	filters := m.backend.Filters(m.kind())
+	filters := m.filters()
 	parts := make([]string, 0, len(filters))
 	for index, filter := range filters {
 		label := " " + filter.Label + " "
@@ -563,6 +598,16 @@ func indexOfString(values []string, target string) int {
 }
 
 func (m Model) listHelp() string {
+	if m.workspace != nil && !m.localTab() && m.kind() == provider.Commits {
+		switch m.focus {
+		case focusTabs:
+			return "Tabs focused · ←/→ switch tabs · ↓ graph filters · r refresh · q quit"
+		case focusGraphFilters:
+			return "Graph filters focused · ↓ commit navigation · / search · ←/→ author scope · r refresh · q quit"
+		case focusGraphCommits:
+			return "Graph commits focused · ↑ at first returns to filters · → changed files · / search · r refresh · q quit"
+		}
+	}
 	help := fmt.Sprintf(" ↑/↓ select · ←/→ filter · Shift+1...%d tabs · Enter detail", m.tabCount())
 	if m.workspace != nil && m.kind() == provider.Commits {
 		help = " ↑/↓ select · / search · ←/→ author scope · o checkout · p cherry-pick · z soft reset · Z hard reset · v revert"

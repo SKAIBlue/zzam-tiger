@@ -351,6 +351,52 @@ func TestLeftRightChangeFilter(t *testing.T) {
 	}
 }
 
+func TestSlashOpensUnifiedSearchAndEnterMovesToResults(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height, m.loadingList = 80, 16, false
+	m.items[provider.PullRequests] = []provider.Item{{ID: "1", Title: "match me"}, {ID: "2", Title: "other"}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(Model)
+	if !m.graphQuery.Focused() || m.focus != focusListSearch {
+		t.Fatalf("slash did not focus unified search: input=%t focus=%v", m.graphQuery.Focused(), m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("match")})
+	m = updated.(Model)
+	if got := len(m.visibleListItems()); got != 1 {
+		t.Fatalf("search results = %d, want 1", got)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.graphQuery.Focused() || m.focus != focusListItems {
+		t.Fatalf("enter did not move to results: input=%t focus=%v", m.graphQuery.Focused(), m.focus)
+	}
+}
+
+func TestFirstResultUpReturnsToSearchAcrossStandardListTabs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		active int
+		kind   provider.Kind
+	}{
+		{"PR/MR", 0, provider.PullRequests},
+		{"Issues", 1, provider.Issues},
+		{"Milestones", 2, provider.Milestones},
+		{"Actions/Pipeline", 5, provider.CIRuns},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(fakeProvider{}, 0)
+			m.width, m.height, m.loadingList = 80, 16, false
+			m.active, m.focus = tc.active, focusListItems
+			m.items[tc.kind] = []provider.Item{{ID: "first", Title: "first"}}
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+			m = updated.(Model)
+			if m.focus != focusListSearch || !m.graphQuery.Focused() {
+				t.Fatalf("first-result up did not focus search: focus=%v input=%t", m.focus, m.graphQuery.Focused())
+			}
+		})
+	}
+}
+
 func TestEscapeReturnsFromDetail(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.screen = detailScreen

@@ -207,15 +207,129 @@ func (m Model) finishWorkspaceLoad(cmd tea.Cmd) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
+	// A tab change always returns ownership of the arrows to the tab bar. This
+	// also makes a formerly hidden preview or input impossible to retain focus.
+	m.focus = focusTabs
+	m.fileFilter.Blur()
+	m.commitMessage.Blur()
+	m.graphFilter.Blur()
 	m.loadingList = false
 	m.workspaceLoading = false
 	m.workspacePreviewLoading = false
 	m.workspacePreviewRequest++
 	m.err = nil
 	if m.localTab() {
-		return m.startWorkspaceLoad()
+		next, load := m.startWorkspaceLoad()
+		return next, tea.Batch(tea.ClearScreen, load)
 	}
-	return m.startListLoad()
+	next, load := m.startListLoad()
+	// File previews can emit terminal-side graphics commands. Clear the frame
+	// when changing tabs so Bubble Tea repaints the header and tabs instead of
+	// relying on an incremental diff against a terminal that was altered outside
+	// its renderer.
+	return next, tea.Batch(tea.ClearScreen, load)
+}
+
+func (m Model) workspacePreviewAvailable() bool {
+	left, right := m.workspacePaneWidths()
+	if right < 2 || left < 1 {
+		return false
+	}
+	if m.workspaceFilesActive() {
+		entries := m.filteredWorkspaceEntries()
+		return m.workspaceCursor >= 0 && m.workspaceCursor < len(entries) && !entries[m.workspaceCursor].IsDir
+	}
+	changes := m.filteredWorkspaceChanges()
+	return m.workspaceCursor >= 0 && m.workspaceCursor < len(changes) && !changes[m.workspaceCursor].isDir
+}
+
+// updateWorkspaceFocus handles only the directional focus contract. All other
+// shortcuts remain in updateWorkspace below.
+func (m Model) updateWorkspaceFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	key := msg.String()
+	switch m.focus {
+	case focusTabs:
+		switch key {
+		case "left":
+			m.active = (m.active - 1 + m.tabCount()) % m.tabCount()
+			next, cmd := m.startActiveTabLoad()
+			return next, cmd, true
+		case "right":
+			m.active = (m.active + 1) % m.tabCount()
+			next, cmd := m.startActiveTabLoad()
+			return next, cmd, true
+		case "down":
+			m.focus = focusFileFilter
+			return m, m.fileFilter.Focus(), true
+		}
+	case focusCommitMessage:
+		if key == "up" {
+			m.commitMessage.Blur()
+			m.focus = focusFileFilter
+			return m, m.fileFilter.Focus(), true
+		}
+		if key == "down" || key == "enter" {
+			m.commitMessage.Blur()
+			m.focus = focusWorkspaceList
+			return m, nil, true
+		}
+	case focusFileFilter:
+		if key == "up" {
+			m.fileFilter.Blur()
+			m.focus = focusTabs
+			return m, nil, true
+		}
+		if key == "down" || key == "enter" {
+			m.fileFilter.Blur()
+			if m.workspaceCommitActive() {
+				m.focus = focusCommitMessage
+				return m, m.commitMessage.Focus(), true
+			}
+			m.focus = focusWorkspaceList
+			return m, nil, true
+		}
+	case focusWorkspaceList:
+		switch key {
+		case "right":
+			if m.workspacePreviewAvailable() {
+				m.focus = focusWorkspacePreview
+				return m, nil, true
+			}
+			m.status = "no selectable preview"
+			return m, nil, true
+		case "up":
+			if m.workspaceCursor == 0 {
+				if m.workspaceCommitActive() {
+					m.focus = focusCommitMessage
+					return m, m.commitMessage.Focus(), true
+				}
+				m.focus = focusFileFilter
+				return m, m.fileFilter.Focus(), true
+			}
+		case "down":
+			next, cmd := m.moveWorkspaceCursor(1)
+			return next, cmd, true
+		}
+	case focusWorkspacePreview:
+		switch key {
+		case "left":
+			m.focus = focusWorkspaceList
+			return m, nil, true
+		case "down":
+			return m.moveWorkspacePreview(1), nil, true
+		case "up":
+			if m.workspacePreviewOffset > 0 {
+				return m.moveWorkspacePreview(-1), nil, true
+			}
+			if m.workspaceCommitActive() {
+				m.focus = focusCommitMessage
+				return m, m.commitMessage.Focus(), true
+			}
+			m.focus = focusFileFilter
+			return m, m.fileFilter.Focus(), true
+		}
+	}
+	return m, nil, false
 }
 
 func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd) {
@@ -785,6 +899,9 @@ func (m Model) moveWorkspacePreview(delta int) Model {
 }
 
 func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if next, cmd, handled := m.updateWorkspaceFocus(msg); handled {
+		return next, cmd
+	}
 	if m.workspaceCommitActive() && m.commitMessage.Focused() {
 		switch msg.String() {
 		case "esc":
