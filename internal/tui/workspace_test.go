@@ -201,7 +201,7 @@ func TestUnavailableProviderShowsOnlyLocalGraphAndBranches(t *testing.T) {
 	}
 }
 
-func TestUnavailableProviderRendersLocalGraphInsteadOfRemoteError(t *testing.T) {
+func TestUnavailableProviderRendersLocalGraphAndRemoteHeaderWarning(t *testing.T) {
 	m := newWithWorkspace(nil, 0, &fakeWorkspace{}).WithRemoteUnavailable(errors.New("gh missing"))
 	m.active = 2 // Graph after Commit and Files.
 	m.width, m.height = 100, 20
@@ -210,14 +210,15 @@ func TestUnavailableProviderRendersLocalGraphInsteadOfRemoteError(t *testing.T) 
 	if !strings.Contains(view, "local change") {
 		t.Fatalf("local Graph was hidden by remote error:\n%s", view)
 	}
-	if strings.Contains(view, "gh missing") {
-		t.Fatalf("remote error overlaid local Graph:\n%s", view)
+	if !strings.Contains(view, "remote unavailable: gh missing") {
+		t.Fatalf("remote error was not visible in the header:\n%s", view)
 	}
 }
 
 func TestFilesOnlyModeHasNoGitOrRemoteTabs(t *testing.T) {
 	m := NewFilesOnly(worktree.NewFilesystem(t.TempDir()))
 	defer m.Close()
+	m.width = 100
 	if !m.localTab() || !m.workspaceFilesActive() || m.workspaceCommitActive() {
 		t.Fatalf("files-only state: local=%t files=%t commit=%t", m.localTab(), m.workspaceFilesActive(), m.workspaceCommitActive())
 	}
@@ -226,6 +227,9 @@ func TestFilesOnlyModeHasNoGitOrRemoteTabs(t *testing.T) {
 	}
 	if m.tabCount() != 1 {
 		t.Fatalf("files-only tab count = %d, want 1", m.tabCount())
+	}
+	if header := ansi.Strip(m.headerView("")); !strings.Contains(header, "Git repository not detected") {
+		t.Fatalf("header did not explain files-only mode: %q", header)
 	}
 }
 

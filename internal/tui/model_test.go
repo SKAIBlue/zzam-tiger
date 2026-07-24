@@ -187,6 +187,23 @@ func TestHeaderUsesProductNameAndVersion(t *testing.T) {
 	}
 }
 
+func TestHeaderShowsUnavailableWarningsBesideVersion(t *testing.T) {
+	m := New(nil, 0).WithRemoteUnavailable(errors.New("GitHub CLI (gh) is not installed"))
+	m.currentVersion = "v1.2.3"
+	m.width = 160
+	header := ansi.Strip(m.headerView(""))
+	if !strings.Contains(header, "v1.2.3") || !strings.Contains(header, "GitHub CLI (gh) is not installed") {
+		t.Fatalf("header = %q", header)
+	}
+
+	filesOnly := NewFilesOnly(worktree.NewFilesystem(t.TempDir()))
+	defer filesOnly.Close()
+	filesOnly.width = 160
+	if header := ansi.Strip(filesOnly.headerView("")); !strings.Contains(header, "Git repository not detected") {
+		t.Fatalf("files-only header = %q", header)
+	}
+}
+
 func TestInstallerCompletionRestartsAndClosesWatcher(t *testing.T) {
 	watcher := &fakeWorkspaceWatcher{updates: make(chan worktree.WatchUpdate)}
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})

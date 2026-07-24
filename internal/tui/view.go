@@ -49,6 +49,7 @@ var (
 	headerContextStyle  = lipgloss.NewStyle().Foreground(text).Background(headerSlate).Padding(0, 1)
 	headerAccentStyle   = lipgloss.NewStyle().Foreground(headerPurple).Background(headerBlue)
 	headerContextEdge   = lipgloss.NewStyle().Foreground(headerBlue).Background(headerSlate)
+	headerWarningStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFE8E8")).Background(lipgloss.Color("#651C2A")).Padding(0, 1)
 )
 
 func (m Model) View() string {
@@ -253,11 +254,25 @@ func (m Model) headerContent(title string) string {
 	if m.currentVersion != "" {
 		version = headerAccentStyle.Render("") + headerVersionStyle.Render(m.currentVersion)
 	}
+	warning := m.headerWarning()
+	if warning != "" {
+		version += headerWarningStyle.Render(warning)
+	}
 	context := strings.TrimSpace(title)
 	if context == "" {
 		return brand + version
 	}
 	return brand + version + headerContextEdge.Render("") + headerContextStyle.Render(context)
+}
+
+func (m Model) headerWarning() string {
+	if m.remoteErr != nil {
+		return " remote unavailable: " + sanitizeWorkspaceLabel(m.remoteErr.Error())
+	}
+	if m.filesOnly {
+		return " Git repository not detected · file browser only"
+	}
+	return ""
 }
 
 func (m Model) updateButtonStart() int {
