@@ -159,13 +159,18 @@ func TestWatcherSupportsLinkedWorktreeAndCloses(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case _, ok := <-w.Updates():
-		if ok {
-			t.Fatal("watcher produced an update after close")
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case _, ok := <-w.Updates():
+			if !ok {
+				return
+			}
+			// Events queued before Close remain readable from a closed buffered
+			// channel. Keep draining until the channel reaches its closed state.
+		case <-deadline:
+			t.Fatal("watcher updates channel did not close")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("watcher updates channel did not close")
 	}
 }
 
