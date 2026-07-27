@@ -722,6 +722,85 @@ func TestRenderDetailIncludesDiffContentAndLineNumbers(t *testing.T) {
 	}
 }
 
+func TestNarrowDiffWrapRepeatsGutterAndMapsContinuationRow(t *testing.T) {
+	file := provider.DiffFile{
+		NewPath: "internal/app.go",
+		Lines: []provider.DiffLine{{
+			NewLine: 187,
+			Text:    "+" + strings.Repeat("capability", 10),
+		}},
+	}
+	const width = 50
+	rendered := ansi.Strip(renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width))
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < 3 || !strings.HasPrefix(lines[1], "      187 │ +") || !strings.HasPrefix(lines[2], "          │  ") {
+		t.Fatalf("wrapped diff did not repeat its gutter: %q", rendered)
+	}
+	regions := diffFileHitRegions(file, 0, width, 0, 0)
+	if len(regions) < 2 || regions[0].Line != 0 || regions[1].Line != 0 || regions[1].Row != regions[0].Row+1 {
+		t.Fatalf("continuation row was not mapped to its diff line: %#v", regions)
+	}
+}
+
+func TestHighlightedDiffWrapsEveryContinuationWithGutter(t *testing.T) {
+	file := provider.DiffFile{
+		NewPath: "internal/api/auth_test.go",
+		Lines: []provider.DiffLine{
+			{NewLine: 183, Text: "+func TestCapabilitiesRecognizeBusinessLegalDisclosureGrant(t *testing.T) {"},
+			{NewLine: 184, Text: "+\tif !validCapabilities([]string{\"accounts:business-legal:read\", \"auth:read\"}) {"},
+			{NewLine: 185, Text: "+\t\tt.Fatal(\"business legal disclosure capability was not recognized\")"},
+		},
+	}
+	const width = 76
+	rendered := ansi.Strip(renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width))
+	for _, line := range strings.Split(rendered, "\n")[1:] {
+		if !strings.Contains(line, "│") {
+			t.Fatalf("wrapped highlighted row lost its gutter: %q in %q", line, rendered)
+		}
+		if lipgloss.Width(line) > width {
+			t.Fatalf("highlighted diff row width = %d, want <= %d: %q", lipgloss.Width(line), width, line)
+		}
+	}
+}
+
+func TestDetailBoxWrapsDiffBeforeTerminalAndKeepsContinuationGutter(t *testing.T) {
+	detail := provider.Detail{Diffs: []provider.DiffFile{{
+		NewPath: "internal/api/auth_test.go",
+		Lines: []provider.DiffLine{
+			{NewLine: 183, Text: "+func TestCapabilitiesRecognizeBusinessLegalDisclosureGrant(t *testing.T) {"},
+			{NewLine: 184, Text: "+\tif !validCapabilities([]string{\"accounts:business-legal:read\", \"auth:read\"}) {"},
+		},
+	}}}
+	const width = 88
+	rendered := ansi.Strip(renderDetail(detail, width))
+	if !strings.Contains(rendered, "          │  ") {
+		t.Fatalf("detail box wrapped without a continuation gutter: %q", rendered)
+	}
+	for _, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("detail row width = %d, terminal width = %d: %q", got, width, line)
+		}
+		if strings.TrimSpace(line) != "" && (strings.Contains(line, "testing.T") || strings.Contains(line, "auth:read") || strings.Contains(line, "recognized") || strings.Contains(line, `")`)) && strings.Count(line, "│") < 3 {
+			t.Fatalf("detail box rewrapped code outside the diff gutter: %q in %q", line, rendered)
+		}
+	}
+}
+
+func TestResizeKeepsDiffBoxFlushWithTerminalEdge(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = updated.(Model)
+	if m.viewport.Width != 80 {
+		t.Fatalf("viewport width = %d, want terminal width", m.viewport.Width)
+	}
+	m.setDetailContent()
+	for _, line := range strings.Split(m.viewport.View(), "\n") {
+		if strings.HasPrefix(ansi.Strip(line), "╭") && lipgloss.Width(line) != 80 {
+			t.Fatalf("diff/detail box width = %d, want 80: %q", lipgloss.Width(line), ansi.Strip(line))
+		}
+	}
+}
+
 func TestDiffRenderingShowsReviewUnderTargetLine(t *testing.T) {
 	content := renderDiffFile([]provider.DiffFile{{
 		NewPath: "internal/app.go",
@@ -842,6 +921,33 @@ func TestRemoteDiffSwitchesToSplitLayoutWhenWide(t *testing.T) {
 	}
 }
 
+func TestSplitDiffWrapsWithoutEllipsisAndKeepsSeparatorFixed(t *testing.T) {
+	const width = 100
+	content := strings.Repeat("prepared.rawQuery ", 8) + "tail"
+	file := provider.DiffFile{NewPath: "client.go", Lines: []provider.DiffLine{
+		{OldLine: 314, NewLine: 314, Text: "\t\treturn false"},
+		{NewLine: 315, Text: "+\t\t" + content},
+	}}
+	rendered := ansi.Strip(renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width))
+	if strings.Contains(rendered, "...") || !strings.Contains(rendered, "tail") {
+		t.Fatalf("split diff truncated long content: %q", rendered)
+	}
+	column := max(12, (width-3)/2)
+	rows := strings.Split(rendered, "\n")
+	if len(rows) < 4 {
+		t.Fatalf("split diff did not wrap into visual rows: %q", rendered)
+	}
+	for _, row := range rows[1:] {
+		if separator := strings.Index(row, " │ "); separator != column {
+			t.Fatalf("split separator column = %d, want %d: %q", separator, column, row)
+		}
+	}
+	regions := diffFileHitRegions(file, 0, width, 0, 0)
+	if len(regions) < 3 || regions[len(regions)-2].Line != 1 || regions[len(regions)-1].Line != 1 {
+		t.Fatalf("wrapped split rows were not mapped to their diff line: %#v", regions)
+	}
+}
+
 func readyDetailModel(backend provider.Provider, kind provider.Kind) Model {
 	m := New(backend, 0)
 	for index, candidate := range kinds {
@@ -876,7 +982,7 @@ func TestDiffScreenNavigatesFilesAndLines(t *testing.T) {
 	}
 	updated, _ = m.Update(key('j'))
 	m = updated.(Model)
-	if m.diffLine != 1 || !strings.Contains(m.viewport.View(), renderDiffBackground("        3 │ +added", "#315F85")) {
+	if m.diffLine != 1 || !strings.Contains(m.viewport.View(), "\x1b[48;2;49;95;133m") || !strings.Contains(m.viewport.View(), "added") {
 		t.Fatalf("selected added line was not highlighted: line=%d view=%q", m.diffLine, m.viewport.View())
 	}
 	updated, _ = m.Update(key('v'))

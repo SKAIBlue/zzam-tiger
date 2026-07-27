@@ -53,7 +53,11 @@ func (h codeHighlighter) line(value string) string {
 		output.WriteString(token.Value)
 		output.WriteString("\x1b[0m")
 	}
-	return output.String()
+	// This helper highlights one visual source line. Some lexers append a
+	// synthetic newline for incomplete fragments (for example a wrapped Go
+	// string or function signature), which would otherwise trigger a second,
+	// irregular wrap in the surrounding diff box.
+	return strings.NewReplacer("\r", "", "\n", "").Replace(output.String())
 }
 
 func (h codeHighlighter) available() bool {

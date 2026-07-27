@@ -890,7 +890,7 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		lines = append(lines, metaStyle.Render(padRight("OLD", column)+" │ "+padRight("NEW", column)))
 	}
 	for index, line := range file.Lines {
-		line.Text = sanitizeWorkspaceText(line.Text)
+		line.Text = expandDiffTabs(sanitizeWorkspaceText(line.Text))
 		inRange := rangeAnchor >= 0 && index >= min(rangeAnchor, selectedLine) && index <= max(rangeAnchor, selectedLine)
 		isSelected := index == selectedLine
 		oldNumber := ""
@@ -902,46 +902,39 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 			newNumber = fmt.Sprintf("%d", line.NewLine)
 		}
 		marker, content := diffLineParts(line.Text)
-		highlighted := content
-		highlighted = highlighter.line(content)
-		row := fmt.Sprintf("%4s %4s │ %s%s", oldNumber, newNumber, marker, highlighted)
+		rows := []string{}
 		if split {
-			left, right := "", ""
-			switch marker {
-			case "+":
-				right = fmt.Sprintf("%4s + %s", newNumber, highlighted)
-			case "-":
-				left = fmt.Sprintf("%4s - %s", oldNumber, highlighted)
-			default:
-				left = fmt.Sprintf("%4s   %s", oldNumber, highlighted)
-				right = fmt.Sprintf("%4s   %s", newNumber, highlighted)
+			rows = renderSplitDiffRows(oldNumber, newNumber, marker, content, column, highlighter)
+		} else {
+			const gutterWidth = 13 // "0000 0000 │ +"
+			contentWidth := max(1, width-gutterWidth)
+			// Wrap the plain source before adding ANSI syntax styles. Wrapping the
+			// highlighted string can split style sequences and make the enclosing
+			// Lip Gloss box wrap the row a second time at irregular positions.
+			wrapped := strings.Split(ansi.Hardwrap(content, contentWidth, true), "\n")
+			rows = append(rows, fmt.Sprintf("%4s %4s │ %s%s", oldNumber, newNumber, marker, highlighter.line(wrapped[0])))
+			for _, continuation := range wrapped[1:] {
+				rows = append(rows, "          │  "+highlighter.line(continuation))
 			}
-			left = padRight(truncate(left, column), column)
-			right = padRight(truncate(right, column), column)
-			if left == strings.Repeat(" ", column) {
-				left = diffGapStyle.Render(left)
-			}
-			if right == strings.Repeat(" ", column) {
-				right = diffGapStyle.Render(right)
-			}
-			row = left + metaStyle.Render(" │ ") + right
 		}
 		isAddition := strings.HasPrefix(line.Text, "+")
 		isRemoval := strings.HasPrefix(line.Text, "-")
-		if !isAddition && !isRemoval {
-			row = metaStyle.Render(row)
+		for _, row := range rows {
+			if !isAddition && !isRemoval {
+				row = metaStyle.Render(row)
+			}
+			switch {
+			case isSelected:
+				row = renderDiffBackground(row, "#315F85")
+			case inRange:
+				row = renderDiffBackground(row, "#244B6B")
+			case isAddition:
+				row = renderDiffBackground(row, "#203C2F")
+			case isRemoval:
+				row = renderDiffBackground(row, "#482B31")
+			}
+			lines = append(lines, row)
 		}
-		switch {
-		case isSelected:
-			row = renderDiffBackground(row, "#315F85")
-		case inRange:
-			row = renderDiffBackground(row, "#244B6B")
-		case isAddition:
-			row = renderDiffBackground(row, "#203C2F")
-		case isRemoval:
-			row = renderDiffBackground(row, "#482B31")
-		}
-		lines = append(lines, row)
 		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
 			lines = append(lines, renderDiffReviewState(file.Reviews[reviewIndex], width, reviewIndex == selectedReview))
 		}
@@ -952,6 +945,53 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func expandDiffTabs(value string) string {
+	// Lip Gloss expands every tab to four cells during its final render. Do it
+	// before wrapping and column measurement so split separators stay fixed.
+	return strings.ReplaceAll(value, "\t", "    ")
+}
+
+func renderSplitDiffRows(oldNumber, newNumber, marker, content string, column int, highlighter codeHighlighter) []string {
+	const gutterWidth = 7 // "0000 + "
+	wrapped := strings.Split(ansi.Hardwrap(content, max(1, column-gutterWidth), true), "\n")
+	if len(wrapped) == 0 {
+		wrapped = []string{""}
+	}
+	rows := make([]string, 0, len(wrapped))
+	for index, fragment := range wrapped {
+		left, right := "", ""
+		prefixOld, prefixNew := "       ", "       "
+		if index == 0 {
+			prefixOld = fmt.Sprintf("%4s - ", oldNumber)
+			prefixNew = fmt.Sprintf("%4s + ", newNumber)
+			if marker != "+" && marker != "-" {
+				prefixOld = fmt.Sprintf("%4s   ", oldNumber)
+				prefixNew = fmt.Sprintf("%4s   ", newNumber)
+			}
+		}
+		highlighted := highlighter.line(fragment)
+		switch marker {
+		case "+":
+			right = prefixNew + highlighted
+		case "-":
+			left = prefixOld + highlighted
+		default:
+			left = prefixOld + highlighted
+			right = prefixNew + highlighted
+		}
+		left = padRight(left, column)
+		right = padRight(right, column)
+		if strings.TrimSpace(ansi.Strip(left)) == "" {
+			left = diffGapStyle.Render(strings.Repeat(" ", column))
+		}
+		if strings.TrimSpace(ansi.Strip(right)) == "" {
+			right = diffGapStyle.Render(strings.Repeat(" ", column))
+		}
+		rows = append(rows, left+metaStyle.Render(" │ ")+right)
+	}
+	return rows
 }
 
 func reviewsEndingAt(reviews []provider.DiffReview, line provider.DiffLine) []provider.DiffReview {

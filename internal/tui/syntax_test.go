@@ -77,6 +77,18 @@ func TestHighlightedDiffsPreserveMarkersSelectionAndSanitization(t *testing.T) {
 	}
 }
 
+func TestCodeHighlighterLineNeverAddsNewline(t *testing.T) {
+	highlighter := newCodeHighlighter("auth_test.go")
+	for _, fragment := range []string{
+		`func TestCapabilitiesRecognizeBusinessLegalDisclosureGrant(t *t`,
+		`if !validCapabilities([]string{"accounts:business-legal:read", `,
+	} {
+		if highlighted := highlighter.line(fragment); strings.ContainsAny(highlighted, "\r\n") {
+			t.Fatalf("single-line highlight added a newline: %q", highlighted)
+		}
+	}
+}
+
 func TestDiffBackgroundStopsAtTextAndLongTextCanWrap(t *testing.T) {
 	short := renderUnifiedWorkspaceDiff(worktree.Diff{Path: "main.go", Patch: "+package main"}, 20)
 	shortLine := strings.Split(short, "\n")[1]

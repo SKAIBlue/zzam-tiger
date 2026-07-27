@@ -1828,7 +1828,9 @@ func (m Model) listHeight() int {
 }
 
 func (m *Model) resizeViewport() {
-	width := m.width - 4
+	// Boxes account for their own borders. Use the reported terminal width so
+	// full-width detail and diff boxes do not extend into an extra column.
+	width := m.width
 	height := m.height - 5
 	if width < 20 {
 		width = 20
@@ -2099,12 +2101,26 @@ func diffContentRowForLine(file provider.DiffFile, lineIndex, width int) int {
 		if index == lineIndex {
 			return row
 		}
-		row++
+		row += diffLineRenderHeight(line, width)
 		for _, review := range reviewsEndingAt(file.Reviews, line) {
 			row += lipgloss.Height(renderDiffReview(review, width))
 		}
 	}
 	return row
+}
+
+func diffLineRenderHeight(line provider.DiffLine, width int) int {
+	if width >= 100 {
+		const splitGutterWidth = 7
+		column := max(12, (width-3)/2)
+		_, content := diffLineParts(expandDiffTabs(sanitizeWorkspaceText(line.Text)))
+		contentWidth := max(1, column-splitGutterWidth)
+		return max(1, (lipgloss.Width(content)+contentWidth-1)/contentWidth)
+	}
+	const gutterWidth = 13
+	_, content := diffLineParts(expandDiffTabs(sanitizeWorkspaceText(line.Text)))
+	contentWidth := max(1, width-gutterWidth)
+	return max(1, (lipgloss.Width(content)+contentWidth-1)/contentWidth)
 }
 
 func diffContentHeaderHeight(file provider.DiffFile) int {
@@ -2174,7 +2190,10 @@ func renderDetailLayout(detail provider.Detail, width, selectedFile, selectedLin
 		if index == selectedFile {
 			line, anchor, review = selectedLine, rangeAnchor, selectedReview
 		}
-		contentWidth := boxWidth - 4
+		// Keep the box full-width, but reserve the viewport's six-column
+		// horizontal safety inset inside it. Without this inset Lip Gloss wraps
+		// the already-rendered diff row again, dropping the continuation gutter.
+		contentWidth := boxWidth - 10
 		diffContent := renderDiffFileState(detail.Diffs, index, line, anchor, review, contentWidth)
 		box := detailBoxStyle.Width(boxWidth).Render(sectionTitleStyle.Render("Diff") + "\n" + diffContent)
 		row++
@@ -2195,8 +2214,11 @@ func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX
 	regions := make([]diffHitRegion, 0)
 	row := diffContentHeaderHeight(file)
 	for lineIndex, line := range file.Lines {
-		regions = append(regions, diffHitRegion{Row: baseRow + row, File: fileIndex, Line: lineIndex, Review: -1, ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1})
-		row++
+		height := diffLineRenderHeight(line, width)
+		for offset := 0; offset < height; offset++ {
+			regions = append(regions, diffHitRegion{Row: baseRow + row + offset, File: fileIndex, Line: lineIndex, Review: -1, ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1})
+		}
+		row += height
 		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
 			review := file.Reviews[reviewIndex]
 			height := lipgloss.Height(renderDiffReview(review, width))
