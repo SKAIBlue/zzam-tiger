@@ -51,19 +51,25 @@ type workspaceClient interface {
 }
 
 type workspaceResultMsg struct {
-	request uint64
-	op      string
-	entries []worktree.Entry
-	file    worktree.File
-	status  worktree.Status
-	diff    worktree.Diff
-	image   string
-	rows    []string
-	width   int
-	height  int
+	request   uint64
+	op        string
+	entries   []worktree.Entry
+	file      worktree.File
+	status    worktree.Status
+	diff      worktree.Diff
+	image     string
+	rows      []string
+	width     int
+	height    int
+	dir       string
+	expand    bool
+	entryDirs []workspaceEntryDirectory
+	err       error
+}
+
+type workspaceEntryDirectory struct {
 	dir     string
-	expand  bool
-	err     error
+	entries []worktree.Entry
 }
 
 type workspaceActionResultMsg struct {
@@ -99,8 +105,11 @@ func (m Model) fetchWorkspaceCmd(request uint64) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if m.workspaceFilesActive() {
-			entries, err := m.workspace.Entries(ctx, "")
-			return workspaceResultMsg{request: request, op: "entries", entries: entries, err: err}
+			groups, err := m.readCompressedWorkspaceEntries(ctx, "")
+			if err != nil {
+				return workspaceResultMsg{request: request, op: "entries", err: err}
+			}
+			return workspaceResultMsg{request: request, op: "entries", entries: groups[0].entries, entryDirs: groups}
 		}
 		status, err := m.workspace.Status(ctx)
 		return workspaceResultMsg{request: request, op: "status", status: status, err: err}
@@ -111,8 +120,27 @@ func (m Model) fetchWorkspaceEntriesCmd(request uint64, dir string, expand bool)
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		entries, err := m.workspace.Entries(ctx, dir)
-		return workspaceResultMsg{request: request, op: "entries", entries: entries, dir: dir, expand: expand, err: err}
+		groups, err := m.readCompressedWorkspaceEntries(ctx, dir)
+		if err != nil {
+			return workspaceResultMsg{request: request, op: "entries", dir: dir, expand: expand, err: err}
+		}
+		return workspaceResultMsg{request: request, op: "entries", entries: groups[0].entries, dir: dir, expand: expand, entryDirs: groups}
+	}
+}
+
+func (m Model) readCompressedWorkspaceEntries(ctx context.Context, dir string) ([]workspaceEntryDirectory, error) {
+	groups := make([]workspaceEntryDirectory, 0, 1)
+	current := dir
+	for {
+		entries, err := m.workspace.Entries(ctx, current)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, workspaceEntryDirectory{dir: current, entries: entries})
+		if len(entries) != 1 || !entries[0].IsDir || m.workspaceExpanded[entries[0].Path] {
+			return groups, nil
+		}
+		current = entries[0].Path
 	}
 }
 
@@ -383,10 +411,30 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		if m.workspaceCursor >= 0 && m.workspaceCursor < len(selected) {
 			selectedPath = selected[m.workspaceCursor].Path
 		}
-		m.replaceWorkspaceDirectory(msg.dir, msg.entries)
-		m.workspaceLoaded[msg.dir] = true
+		groups := msg.entryDirs
+		if len(groups) == 0 {
+			groups = []workspaceEntryDirectory{{dir: msg.dir, entries: msg.entries}}
+		}
+		for _, group := range groups {
+			m.replaceWorkspaceDirectory(group.dir, group.entries)
+			m.workspaceLoaded[group.dir] = true
+		}
 		if msg.expand {
 			m.workspaceExpanded[msg.dir] = true
+		}
+		for index := 1; msg.expand && index+1 < len(groups); index++ {
+			m.workspaceExpanded[groups[index].dir] = true
+		}
+		if len(groups) > 1 {
+			last := groups[len(groups)-1]
+			if len(last.entries) == 1 && !last.entries[0].IsDir {
+				m.workspaceExpanded[last.dir] = true
+			}
+		}
+		if !msg.expand {
+			for index := 1; index+1 < len(groups); index++ {
+				m.workspaceExpanded[groups[index].dir] = true
+			}
 		}
 		m.workspaceEntryPending = max(0, m.workspaceEntryPending-1)
 		m.workspaceLoading = m.workspaceEntryPending > 0
@@ -578,9 +626,16 @@ func (m Model) visibleWorkspaceEntries() []worktree.Entry {
 	var appendChildren func(string)
 	appendChildren = func(parent string) {
 		for _, entry := range children[parent] {
-			result = append(result, entry)
-			if entry.IsDir && m.workspaceExpanded[entry.Path] {
-				appendChildren(entry.Path)
+			display := entry
+			for display.IsDir && m.workspaceExpanded[display.Path] && len(children[display.Path]) == 1 {
+				child := children[display.Path][0]
+				display.Name += "/" + child.Name
+				display.Path = child.Path
+				display.IsDir = child.IsDir
+			}
+			result = append(result, display)
+			if display.IsDir && m.workspaceExpanded[display.Path] {
+				appendChildren(display.Path)
 			}
 		}
 	}
@@ -665,7 +720,23 @@ func (m Model) toggleWorkspaceDirectory() (Model, tea.Cmd) {
 	}
 	if m.workspaceLoaded[dir] {
 		m.workspaceExpanded[dir] = true
-		return m, nil
+		commands := make([]tea.Cmd, 0)
+		for _, entry := range m.workspaceEntries {
+			if workspaceParent(entry.Path) == dir && entry.IsDir && !m.workspaceLoaded[entry.Path] {
+				commands = append(commands, m.fetchWorkspaceEntriesCmd(m.workspaceEntryRequest+1, entry.Path, true))
+			}
+		}
+		if len(commands) == 0 {
+			return m, nil
+		}
+		m.workspaceEntryRequest++
+		m.workspaceEntryPending = len(commands)
+		m.workspaceLoading = true
+		m.err = nil
+		if len(commands) == 1 {
+			return m, commands[0]
+		}
+		return m, tea.Batch(commands...)
 	}
 	m.workspaceEntryRequest++
 	m.workspaceEntryPending = 1
@@ -735,6 +806,34 @@ func workspaceChangeTree(changes []worktree.Change, staged bool) []workspaceChan
 		result = append(result, newWorkspaceChange(change.Path, staged, false, change))
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].path < result[j].path })
+	return compressWorkspaceChangeTree(result)
+}
+
+func compressWorkspaceChangeTree(changes []workspaceChange) []workspaceChange {
+	children := make(map[string][]workspaceChange)
+	for _, change := range changes {
+		children[workspaceParent(change.path)] = append(children[workspaceParent(change.path)], change)
+	}
+	result := make([]workspaceChange, 0, len(changes))
+	var appendChildren func(string, int)
+	appendChildren = func(parent string, depth int) {
+		for _, change := range children[parent] {
+			display := change
+			for display.isDir && len(children[display.path]) == 1 {
+				child := children[display.path][0]
+				display.name += "/" + child.name
+				display.path = child.path
+				display.change = child.change
+				display.isDir = child.isDir
+			}
+			display.depth = depth
+			result = append(result, display)
+			if display.isDir {
+				appendChildren(display.path, depth+1)
+			}
+		}
+	}
+	appendChildren("", 0)
 	return result
 }
 

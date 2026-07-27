@@ -559,6 +559,36 @@ func TestWorkspaceSearchHighlightAppliesToFilesAndCommitTabs(t *testing.T) {
 	}
 }
 
+func TestWorkspaceListsRenderLanguageIcons(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		icon string
+	}{
+		{name: "Go", path: "main.go", icon: ""},
+		{name: "Java", path: "Application.java", icon: ""},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+			m.width, m.height = 80, 20
+
+			m.active = workspaceFilesTab
+			m.workspaceEntries = []worktree.Entry{{Path: test.path, Name: test.path}}
+			if view := m.workspaceList(80, 10); !strings.Contains(view, test.icon+" "+test.path) {
+				t.Fatalf("Files view missing language icon: %q", view)
+			}
+
+			m.active = workspaceCommitTab
+			m.workspaceStatus.Unstaged = []worktree.Change{{Path: test.path, Code: 'M'}}
+			if view := m.workspaceList(80, 10); !strings.Contains(view, test.icon+" "+test.path) {
+				t.Fatalf("Commit view missing language icon: %q", view)
+			}
+		})
+	}
+}
+
 func TestArrowFocusFlowAcrossTabsGraphAndWorkspacePreview(t *testing.T) {
 	t.Setenv("KITTY_WINDOW_ID", "1")
 	workspace := &fakeWorkspace{}
@@ -749,7 +779,7 @@ func TestWorkspaceFilterKeepsParentDirectories(t *testing.T) {
 	m.workspaceExpanded["internal/tui"] = true
 	m.fileFilter.SetValue("model")
 	entries := m.filteredWorkspaceEntries()
-	if len(entries) != 3 || entries[0].Path != "internal" || entries[1].Path != "internal/tui" || entries[2].Path != "internal/tui/model.go" {
+	if len(entries) != 1 || entries[0].Path != "internal/tui/model.go" || entries[0].Name != "internal/tui/model.go" {
 		t.Fatalf("filtered entries = %#v", entries)
 	}
 }
@@ -979,23 +1009,100 @@ func TestWorkspaceCommitChangesFormDirectoryTree(t *testing.T) {
 	changes := m.filteredWorkspaceChanges()
 	want := []struct {
 		path  string
+		name  string
 		dir   bool
 		depth int
 	}{
-		{path: "README.md"},
-		{path: "cmd", dir: true},
-		{path: "cmd/app", dir: true, depth: 1},
-		{path: "cmd/app/main.go", depth: 2},
-		{path: "cmd/app/run.go", depth: 2},
+		{path: "README.md", name: "README.md"},
+		{path: "cmd/app", name: "cmd/app", dir: true},
+		{path: "cmd/app/main.go", name: "main.go", depth: 1},
+		{path: "cmd/app/run.go", name: "run.go", depth: 1},
 	}
 	if len(changes) != len(want) {
 		t.Fatalf("tree length = %d, want %d: %#v", len(changes), len(want), changes)
 	}
 	for index, expected := range want {
 		got := changes[index]
-		if got.displayPath() != expected.path || got.isDir != expected.dir || got.depth != expected.depth {
+		if got.displayPath() != expected.path || got.name != expected.name || got.isDir != expected.dir || got.depth != expected.depth {
 			t.Fatalf("tree item %d = path %q dir=%t depth=%d, want %#v", index, got.displayPath(), got.isDir, got.depth, expected)
 		}
+	}
+}
+
+func TestWorkspaceCommitCompressesSingleChildPaths(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceCommitTab
+	m.workspaceStatus.Unstaged = []worktree.Change{
+		{Path: "com/a/b/c/f/e.java", Code: 'M'},
+		{Path: "com/a/b/d", Code: 'M'},
+	}
+
+	changes := m.filteredWorkspaceChanges()
+	if len(changes) != 3 {
+		t.Fatalf("compressed tree length = %d, want 3: %#v", len(changes), changes)
+	}
+	want := []struct {
+		path, name string
+		isDir      bool
+		depth      int
+	}{
+		{path: "com/a/b", name: "com/a/b", isDir: true},
+		{path: "com/a/b/c/f/e.java", name: "c/f/e.java", depth: 1},
+		{path: "com/a/b/d", name: "d", depth: 1},
+	}
+	for index, expected := range want {
+		got := changes[index]
+		if got.path != expected.path || got.name != expected.name || got.isDir != expected.isDir || got.depth != expected.depth {
+			t.Fatalf("compressed item %d = %#v, want %#v", index, got, expected)
+		}
+	}
+}
+
+func TestWorkspaceFilesCompressesSingleChildPaths(t *testing.T) {
+	workspace := &fakeWorkspace{entriesByDir: map[string][]worktree.Entry{
+		"":            {{Path: "com", Name: "com", IsDir: true}},
+		"com":         {{Path: "com/a", Name: "a", IsDir: true}},
+		"com/a":       {{Path: "com/a/b", Name: "b", IsDir: true}},
+		"com/a/b":     {{Path: "com/a/b/c", Name: "c", IsDir: true}, {Path: "com/a/b/d", Name: "d"}},
+		"com/a/b/c":   {{Path: "com/a/b/c/f", Name: "f", IsDir: true}},
+		"com/a/b/c/f": {{Path: "com/a/b/c/f/e.java", Name: "e.java"}},
+	}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+
+	updated, _ := m.Update(m.fetchWorkspaceCmd(m.workspaceEntryRequest)())
+	m = updated.(Model)
+	entries := m.visibleWorkspaceEntries()
+	if len(entries) != 1 || entries[0].Path != "com/a/b" || entries[0].Name != "com/a/b" || !entries[0].IsDir {
+		t.Fatalf("compressed root entries = %#v", entries)
+	}
+
+	expanded, load := m.toggleWorkspaceDirectory()
+	m = expanded
+	if load != nil {
+		updated, _ = m.Update(load())
+		m = updated.(Model)
+	}
+	entries = m.visibleWorkspaceEntries()
+	if len(entries) != 3 || entries[1].Name != "c/f/e.java" || entries[1].Path != "com/a/b/c/f/e.java" || entries[2].Name != "d" {
+		t.Fatalf("compressed expanded entries = %#v", entries)
+	}
+}
+
+func TestWorkspaceFilesCompressesRootPathEndingInFile(t *testing.T) {
+	workspace := &fakeWorkspace{entriesByDir: map[string][]worktree.Entry{
+		"":        {{Path: "src", Name: "src", IsDir: true}},
+		"src":     {{Path: "src/app", Name: "app", IsDir: true}},
+		"src/app": {{Path: "src/app/main.go", Name: "main.go"}},
+	}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+
+	updated, _ := m.Update(m.fetchWorkspaceCmd(m.workspaceEntryRequest)())
+	m = updated.(Model)
+	entries := m.visibleWorkspaceEntries()
+	if len(entries) != 1 || entries[0].Path != "src/app/main.go" || entries[0].Name != "src/app/main.go" || entries[0].IsDir {
+		t.Fatalf("compressed file path = %#v", entries)
 	}
 }
 
@@ -1065,28 +1172,28 @@ func TestWorkspaceCommitFolderClickCollapsesAndExpandsChildren(t *testing.T) {
 		{Path: "README.md", Code: 'M'},
 	}
 	m.workspaceLoading = false
-	if got := len(m.filteredWorkspaceChanges()); got != 5 {
-		t.Fatalf("expanded changes = %d, want 5", got)
+	if got := len(m.filteredWorkspaceChanges()); got != 4 {
+		t.Fatalf("expanded changes = %d, want 4", got)
 	}
 
 	// The group header is row 5 and the first sorted item (README.md) is row 6,
 	// so the cmd directory is the next clickable row.
 	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	if cmd != nil || !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")] {
-		t.Fatalf("collapse click: cmd=%v collapsed=%t", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")])
+	if cmd != nil || !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")] {
+		t.Fatalf("collapse click: cmd=%v collapsed=%t", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")])
 	}
 	changes := m.filteredWorkspaceChanges()
-	if len(changes) != 2 || changes[0].path != "README.md" || changes[1].path != "cmd" {
+	if len(changes) != 2 || changes[0].path != "README.md" || changes[1].path != "cmd/app" {
 		t.Fatalf("collapsed changes = %#v", changes)
 	}
-	if rendered := m.workspaceList(50, 10); !strings.Contains(rendered, "▸ cmd") {
+	if rendered := m.workspaceList(50, 10); !strings.Contains(rendered, "▸ "+directoryIcon+" cmd/app") {
 		t.Fatalf("collapsed folder icon missing: %q", rendered)
 	}
 
 	updated, cmd = m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	if cmd != nil || m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")] || len(m.filteredWorkspaceChanges()) != 5 {
+	if cmd != nil || m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")] || len(m.filteredWorkspaceChanges()) != 4 {
 		t.Fatalf("expand click: cmd=%v collapsed=%t changes=%d", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")], len(m.filteredWorkspaceChanges()))
 	}
 }
@@ -1706,9 +1813,9 @@ func TestWorkspaceStageAndUnstageDirectoryShortcuts(t *testing.T) {
 			m := newWithWorkspace(fakeProvider{}, 0, workspace)
 			m.active = workspaceCommitTab
 			if test.key == 's' {
-				m.workspaceStatus.Unstaged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}}
+				m.workspaceStatus.Unstaged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}, {Path: test.path + "/model.go", Code: 'M'}}
 			} else {
-				m.workspaceStatus.Staged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}}
+				m.workspaceStatus.Staged = []worktree.Change{{Path: test.path + "/view.go", Code: 'M'}, {Path: test.path + "/model.go", Code: 'M'}}
 			}
 			changes := m.filteredWorkspaceChanges()
 			for index, change := range changes {

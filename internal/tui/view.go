@@ -365,15 +365,18 @@ func (m Model) workspaceList(width, height int) string {
 		for index := start; index < len(entries) && len(rows) < height; index++ {
 			entry := entries[index]
 			depth := strings.Count(entry.Path, "/")
-			icon := "·"
+			prefix := "  "
+			icon := workspaceFileIcon(entry.Name)
 			if entry.IsDir {
-				icon = "▸"
+				prefix = "▸ "
+				icon = directoryIcon
 				if m.workspaceExpanded[entry.Path] {
-					icon = "▾"
+					prefix = "▾ "
+					icon = directoryOpenIcon
 				}
 			}
 			name := m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(entry.Name))
-			row := strings.Repeat("  ", depth) + icon + " " + name
+			row := strings.Repeat("  ", depth) + prefix + icon + " " + name
 			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 			if index == m.workspaceCursor {
 				row = selectedRow.Render(row)
@@ -395,12 +398,15 @@ func (m Model) workspaceList(width, height int) string {
 		item := display.item
 		change := item.change
 		badge := string(change.Code)
-		icon := "·"
+		prefix := "  "
+		icon := workspaceFileIcon(item.displayPath())
 		if item.isDir {
 			badge = " "
-			icon = "▾"
+			prefix = "▾ "
+			icon = directoryOpenIcon
 			if m.workspaceChangeCollapsed[workspaceChangeExpansionKey(item.staged, item.path)] {
-				icon = "▸"
+				prefix = "▸ "
+				icon = directoryIcon
 			}
 		} else if badge == "?" {
 			badge = "U"
@@ -410,7 +416,7 @@ func (m Model) workspaceList(width, height int) string {
 			name = item.displayPath()
 		}
 		name = m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(name))
-		row := fmt.Sprintf("  %s %s%s %s", badge, strings.Repeat("  ", item.depth), icon, name)
+		row := fmt.Sprintf("  %s %s%s%s %s", badge, strings.Repeat("  ", item.depth), prefix, icon, name)
 		row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 		if display.index == m.workspaceCursor {
 			row = selectedRow.Render(row)
@@ -1041,7 +1047,18 @@ func renderDiffReview(review provider.DiffReview, width int) string {
 }
 
 func renderDiffReviewState(review provider.DiffReview, width int, selected bool) string {
+	collapsible := review.Resolved || review.Outdated
 	meta := reviewMetaText(review)
+	if collapsible {
+		if selected {
+			meta += " [Close]"
+		} else {
+			meta += " [Open]"
+		}
+	}
+	if collapsible && !selected {
+		return "  " + reviewMetaStyle.Render(truncate(meta, max(1, width-2)))
+	}
 	body := strings.TrimSpace(review.Body)
 	if body == "" {
 		body = "No review body."

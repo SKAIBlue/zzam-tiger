@@ -239,6 +239,19 @@ func TestFilterTabsCanBeClickedBelowSearch(t *testing.T) {
 	}
 }
 
+func TestListClickUsesRenderedItemStartRow(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height = 80, 20
+	m.resizeViewport()
+	m.screen = listScreen
+	m.items[provider.PullRequests] = []provider.Item{{ID: "first", Title: "First"}, {ID: "second", Title: "Second"}}
+	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.cursor[provider.PullRequests] != 0 || m.selected.ID != "first" || cmd == nil {
+		t.Fatalf("first rendered row selected cursor=%d item=%q command=%v", m.cursor[provider.PullRequests], m.selected.ID, cmd != nil)
+	}
+}
+
 func TestHeaderUsesProductNameAndVersion(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.currentVersion = "v1.2.3"
@@ -1560,8 +1573,48 @@ func TestReviewClickOutsideExplicitActionsDoesNotOpenReply(t *testing.T) {
 	}
 	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 2 + reviewHit.Row, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	if cmd != nil || m.screen != diffScreen || m.selectedReview != 0 {
+	if cmd != nil || m.screen != diffScreen || m.selectedReview != -1 {
 		t.Fatalf("non-action review click triggered an action: screen=%v selected=%d cmd=%v", m.screen, m.selectedReview, cmd)
+	}
+}
+
+func TestResolvedReviewStartsCollapsedAndOpenCloseButtonsToggleBody(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	m.detail.Diffs[0].Reviews = []provider.DiffReview{{
+		ID: "10", ThreadID: "THREAD_1", Author: "alice", Body: "Already handled", NewLine: 2, Side: provider.ReviewSideNew, Resolved: true,
+	}}
+	m.screen = diffScreen
+	m.diffFile, m.diffLine, m.selectedReview = 0, 0, -1
+	m.setDiffContent()
+	plain := ansi.Strip(m.viewport.View())
+	if !strings.Contains(plain, "[Open]") || strings.Contains(plain, "Already handled") {
+		t.Fatalf("resolved review did not start collapsed: %q", plain)
+	}
+	regions := diffFileHitRegions(m.detail.Diffs[0], 0, m.viewport.Width, 0, 0, m.selectedReview)
+	var toggle diffHitRegion
+	for _, hit := range regions {
+		if hit.Review == 0 && hit.ToggleStart >= 0 {
+			toggle = hit
+			break
+		}
+	}
+	updated, _ := m.Update(tea.MouseMsg{X: toggle.ToggleStart, Y: 2 + toggle.Row, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	plain = ansi.Strip(m.viewport.View())
+	if m.selectedReview != 0 || !strings.Contains(plain, "[Close]") || !strings.Contains(plain, "Already handled") {
+		t.Fatalf("Open did not expand resolved review: selected=%d view=%q", m.selectedReview, plain)
+	}
+	regions = diffFileHitRegions(m.detail.Diffs[0], 0, m.viewport.Width, 0, 0, m.selectedReview)
+	for _, hit := range regions {
+		if hit.Review == 0 && hit.ToggleStart >= 0 {
+			toggle = hit
+			break
+		}
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: toggle.ToggleStart, Y: 2 + toggle.Row, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.selectedReview != -1 || strings.Contains(ansi.Strip(m.viewport.View()), "Already handled") {
+		t.Fatalf("Close did not collapse resolved review: selected=%d view=%q", m.selectedReview, ansi.Strip(m.viewport.View()))
 	}
 }
 

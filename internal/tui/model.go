@@ -2026,7 +2026,7 @@ func (m Model) selectedReviewTarget() (provider.ReviewTarget, error) {
 func (m *Model) setDiffContent() {
 	m.viewport.SetContent(renderDiffFileState(m.detail.Diffs, m.diffFile, m.diffLine, m.diffAnchor, m.selectedReview, m.viewport.Width))
 	if m.diffLine >= 0 && m.diffFile >= 0 && m.diffFile < len(m.detail.Diffs) {
-		row := diffContentRowForLine(m.detail.Diffs[m.diffFile], m.diffLine, m.viewport.Width)
+		row := diffContentRowForLine(m.detail.Diffs[m.diffFile], m.diffLine, m.viewport.Width, m.selectedReview)
 		m.viewport.SetYOffset(max(0, row-m.viewport.Height/2))
 	} else {
 		m.viewport.GotoTop()
@@ -2051,7 +2051,7 @@ func (m Model) diffHitAtMouse(x, y int) (diffHitRegion, bool) {
 		return diffHitRegion{}, false
 	}
 	contentRow := m.viewport.YOffset + y - viewportTop
-	regions := diffFileHitRegions(m.detail.Diffs[m.diffFile], m.diffFile, m.viewport.Width, 0, 0)
+	regions := diffFileHitRegions(m.detail.Diffs[m.diffFile], m.diffFile, m.viewport.Width, 0, 0, m.selectedReview)
 	for index := len(regions) - 1; index >= 0; index-- {
 		if regions[index].Row == contentRow {
 			return regions[index], true
@@ -2083,6 +2083,10 @@ func replyButtonHit(hit diffHitRegion, x int) bool {
 	return actionButtonHit(hit.ReplyStart, hit.ReplyEnd, x)
 }
 
+func reviewToggleButtonHit(hit diffHitRegion, x int) bool {
+	return actionButtonHit(hit.ToggleStart, hit.ToggleEnd, x)
+}
+
 func actionButtonHit(start, end, x int) bool {
 	return start >= 0 && x >= start-1 && x <= end
 }
@@ -2095,15 +2099,19 @@ func (m Model) diffLineAtMouse(y int) (int, bool) {
 	return hit.Line, true
 }
 
-func diffContentRowForLine(file provider.DiffFile, lineIndex, width int) int {
+func diffContentRowForLine(file provider.DiffFile, lineIndex, width int, selectedReviews ...int) int {
+	selectedReview := -1
+	if len(selectedReviews) > 0 {
+		selectedReview = selectedReviews[0]
+	}
 	row := diffContentHeaderHeight(file)
 	for index, line := range file.Lines {
 		if index == lineIndex {
 			return row
 		}
 		row += diffLineRenderHeight(line, width)
-		for _, review := range reviewsEndingAt(file.Reviews, line) {
-			row += lipgloss.Height(renderDiffReview(review, width))
+		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
+			row += lipgloss.Height(renderDiffReviewState(file.Reviews[reviewIndex], width, reviewIndex == selectedReview))
 		}
 	}
 	return row
@@ -2148,6 +2156,8 @@ type diffHitRegion struct {
 	ResolveEnd   int
 	ReplyStart   int
 	ReplyEnd     int
+	ToggleStart  int
+	ToggleEnd    int
 }
 
 func renderDetailLayout(detail provider.Detail, width, selectedFile, selectedLine, rangeAnchor, selectedReview int) (string, []diffHitRegion) {
@@ -2202,7 +2212,7 @@ func renderDetailLayout(detail provider.Detail, width, selectedFile, selectedLin
 		for localRow := 0; localRow < lipgloss.Height(box); localRow++ {
 			hits = append(hits, diffHitRegion{Row: boxStart + localRow, File: index, Line: -1, Review: -1, ResolveStart: -1, ResolveEnd: -1})
 		}
-		for _, hit := range diffFileHitRegions(detail.Diffs[index], index, contentWidth, boxStart+2, 2) {
+		for _, hit := range diffFileHitRegions(detail.Diffs[index], index, contentWidth, boxStart+2, 2, selectedReview) {
 			hits = append(hits, hit)
 		}
 		row += lipgloss.Height(box)
@@ -2210,7 +2220,11 @@ func renderDetailLayout(detail provider.Detail, width, selectedFile, selectedLin
 	return strings.Join(sections, "\n"), hits
 }
 
-func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX int) []diffHitRegion {
+func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX int, selectedReviews ...int) []diffHitRegion {
+	selectedReview := -1
+	if len(selectedReviews) > 0 {
+		selectedReview = selectedReviews[0]
+	}
 	regions := make([]diffHitRegion, 0)
 	row := diffContentHeaderHeight(file)
 	for lineIndex, line := range file.Lines {
@@ -2221,9 +2235,10 @@ func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX
 		row += height
 		for _, reviewIndex := range reviewIndexesEndingAt(file.Reviews, line) {
 			review := file.Reviews[reviewIndex]
-			height := lipgloss.Height(renderDiffReview(review, width))
+			expanded := reviewIndex == selectedReview
+			height := lipgloss.Height(renderDiffReviewState(review, width, expanded))
 			for offset := 0; offset < height; offset++ {
-				region := newReviewHitRegion(baseRow+row+offset, fileIndex, lineIndex, reviewIndex, baseX, offset, review)
+				region := newReviewHitRegion(baseRow+row+offset, fileIndex, lineIndex, reviewIndex, baseX, offset, review, expanded)
 				regions = append(regions, region)
 			}
 			row += height
@@ -2233,9 +2248,10 @@ func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX
 		if !review.Outdated && (review.OldLine > 0 || review.NewLine > 0) {
 			continue
 		}
-		height := lipgloss.Height(renderDiffReview(review, width))
+		expanded := reviewIndex == selectedReview
+		height := lipgloss.Height(renderDiffReviewState(review, width, expanded))
 		for offset := 0; offset < height; offset++ {
-			region := newReviewHitRegion(baseRow+row+offset, fileIndex, -1, reviewIndex, baseX, offset, review)
+			region := newReviewHitRegion(baseRow+row+offset, fileIndex, -1, reviewIndex, baseX, offset, review, expanded)
 			regions = append(regions, region)
 		}
 		row += height
@@ -2243,15 +2259,23 @@ func diffFileHitRegions(file provider.DiffFile, fileIndex, width, baseRow, baseX
 	return regions
 }
 
-func newReviewHitRegion(row, file, line, reviewIndex, baseX, offset int, review provider.DiffReview) diffHitRegion {
+func newReviewHitRegion(row, file, line, reviewIndex, baseX, offset int, review provider.DiffReview, expanded bool) diffHitRegion {
 	region := diffHitRegion{
 		Row: row, File: file, Line: line, Review: reviewIndex,
-		ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1,
+		ResolveStart: -1, ResolveEnd: -1, ReplyStart: -1, ReplyEnd: -1, ToggleStart: -1, ToggleEnd: -1,
 	}
 	if offset != 0 {
 		return region
 	}
 	plain := reviewMetaText(review)
+	if review.Resolved || review.Outdated {
+		action := "[Open]"
+		if expanded {
+			action = "[Close]"
+		}
+		plain += " " + action
+		region.ToggleStart, region.ToggleEnd = reviewActionBounds(plain, action, baseX)
+	}
 	region.ResolveStart, region.ResolveEnd = reviewActionBounds(plain, "[Resolve]", baseX)
 	region.ReplyStart, region.ReplyEnd = reviewActionBounds(plain, "[Reply]", baseX)
 	return region
@@ -2395,8 +2419,15 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					m.diffLine = hit.Line
 				}
 				if hit.Review >= 0 {
-					m.selectedReview = hit.Review
-					m.setDiffContentPreservingOffset()
+					if reviewToggleButtonHit(hit, msg.X) {
+						if m.selectedReview == hit.Review {
+							m.selectedReview = -1
+						} else {
+							m.selectedReview = hit.Review
+						}
+						m.setDiffContentPreservingOffset()
+						return m, nil
+					}
 					review := m.detail.Diffs[hit.File].Reviews[hit.Review]
 					if resolveButtonHit(hit, msg.X) {
 						return m.startResolveReview(review)
@@ -2404,6 +2435,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 					if replyButtonHit(hit, msg.X) {
 						return m.openReplyEditor(review)
 					}
+					if review.Resolved || review.Outdated {
+						return m, nil
+					}
+					m.selectedReview = hit.Review
+					m.setDiffContentPreservingOffset()
 					return m, nil
 				}
 				if hit.Line >= 0 {
@@ -2458,9 +2494,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.diffLine = hit.Line
 			}
 			if hit.Review >= 0 {
-				m.selectedReview = hit.Review
-				m.detailDiffActive = true
-				m.setDetailContentPreservingOffset()
+				if reviewToggleButtonHit(hit, msg.X) {
+					if m.selectedReview == hit.Review {
+						m.selectedReview = -1
+					} else {
+						m.selectedReview = hit.Review
+					}
+					m.detailDiffActive = true
+					m.setDetailContentPreservingOffset()
+					return m, nil
+				}
 				review := m.detail.Diffs[hit.File].Reviews[hit.Review]
 				if resolveButtonHit(hit, msg.X) {
 					return m.startResolveReview(review)
@@ -2468,6 +2511,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				if replyButtonHit(hit, msg.X) {
 					return m.openReplyEditor(review)
 				}
+				if review.Resolved || review.Outdated {
+					return m, nil
+				}
+				m.selectedReview = hit.Review
+				m.detailDiffActive = true
+				m.setDetailContentPreservingOffset()
 				return m, nil
 			}
 			if hit.Line < 0 {
@@ -2516,8 +2565,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.startListLoad()
 		}
 	}
-	if msg.Y >= 5 && msg.Y < 5+m.listHeight() {
-		index := m.offset[m.kind()] + msg.Y - 5
+	if msg.Y >= 6 && msg.Y < 6+m.listHeight() {
+		index := m.offset[m.kind()] + msg.Y - 6
 		if index >= 0 && index < len(m.items[m.kind()]) {
 			m.cursor[m.kind()] = index
 			return m.openSelected()
