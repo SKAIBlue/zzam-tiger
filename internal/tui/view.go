@@ -923,6 +923,9 @@ func renderDiffFileState(files []provider.DiffFile, fileIndex, selectedLine, ran
 			if !isAddition && !isRemoval {
 				row = metaStyle.Render(row)
 			}
+			if !split && (isAddition || isRemoval) {
+				row = padRight(row, width)
+			}
 			switch {
 			case isSelected:
 				row = renderDiffBackground(row, "#315F85")

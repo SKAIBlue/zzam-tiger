@@ -53,7 +53,7 @@ func TestHighlightedDiffsPreserveMarkersSelectionAndSanitization(t *testing.T) {
 		Patch: "--- a/main.go\n+++ b/main.go\n@@ -1 +1 @@\n-package old\n+package new\x1b[2J\n",
 	}, 60)
 	plain := ansi.Strip(workspace)
-	if !strings.Contains(plain, "--- a/main.go") || !strings.Contains(plain, "+++ b/main.go") || !strings.Contains(plain, "-package old") || !strings.Contains(plain, "+package new[2J") {
+	if strings.Contains(plain, "--- a/main.go") || strings.Contains(plain, "+++ b/main.go") || !strings.Contains(plain, "-package old") || !strings.Contains(plain, "+package new[2J") {
 		t.Fatalf("highlighted unified diff lost syntax, markers, or sanitized text: %q", workspace)
 	}
 	if !strings.Contains(workspace, "\x1b[48;2;72;43;49m") || !strings.Contains(workspace, "\x1b[48;2;32;60;47m") || !strings.Contains(workspace, "\x1b[38;2;") {
@@ -86,20 +86,5 @@ func TestCodeHighlighterLineNeverAddsNewline(t *testing.T) {
 		if highlighted := highlighter.line(fragment); strings.ContainsAny(highlighted, "\r\n") {
 			t.Fatalf("single-line highlight added a newline: %q", highlighted)
 		}
-	}
-}
-
-func TestDiffBackgroundStopsAtTextAndLongTextCanWrap(t *testing.T) {
-	short := renderUnifiedWorkspaceDiff(worktree.Diff{Path: "main.go", Patch: "+package main"}, 20)
-	shortLine := strings.Split(short, "\n")[1]
-	if width := lipgloss.Width(shortLine); width != len("+package main") {
-		t.Fatalf("short background row width = %d, want text width: %q", width, shortLine)
-	}
-
-	longText := "+package main // this text is intentionally wider than the viewport"
-	long := renderUnifiedWorkspaceDiff(worktree.Diff{Path: "main.go", Patch: longText}, 20)
-	longLine := strings.Split(long, "\n")[1]
-	if width := lipgloss.Width(longLine); width <= 20 {
-		t.Fatalf("long code was truncated instead of being left to wrap: width=%d row=%q", width, longLine)
 	}
 }

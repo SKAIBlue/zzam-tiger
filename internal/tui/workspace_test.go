@@ -1143,34 +1143,8 @@ func TestWorkspaceCommitRequiresMessageAndStagedChanges(t *testing.T) {
 	}
 }
 
-func TestAlignDiffLinesKeepsInsertionAligned(t *testing.T) {
-	pairs := alignDiffLines([]string{"a", "b", "c"}, []string{"a", "inserted", "b", "c"})
-	want := []alignedDiffLine{
-		{old: "a", new: "a", hasOld: true, hasNew: true},
-		{new: "inserted", hasNew: true},
-		{old: "b", new: "b", hasOld: true, hasNew: true},
-		{old: "c", new: "c", hasOld: true, hasNew: true},
-	}
-	if len(pairs) != len(want) {
-		t.Fatalf("pairs = %#v", pairs)
-	}
-	for index := range want {
-		if pairs[index] != want[index] {
-			t.Fatalf("pair %d = %#v, want %#v", index, pairs[index], want[index])
-		}
-	}
-}
-
-func TestAlignDiffLinesRendersReplacementAsRemovalThenAddition(t *testing.T) {
-	pairs := alignDiffLines([]string{"public value"}, []string{"private value"})
-	want := []alignedDiffLine{{old: "public value", hasOld: true}, {new: "private value", hasNew: true}}
-	if len(pairs) != len(want) || pairs[0] != want[0] || pairs[1] != want[1] {
-		t.Fatalf("replacement pairs = %#v, want %#v", pairs, want)
-	}
-}
-
 func TestWorkspaceSideBySideDiffDistinguishesBlankLinesFromGaps(t *testing.T) {
-	diff := worktree.Diff{Path: "main.go", Old: []byte("value\n"), New: []byte("value\n\n")}
+	diff := worktree.Diff{Path: "main.go", Old: []byte("value\n"), New: []byte("value\n\n"), Patch: "@@ -1 +1,2 @@\n value\n+\n"}
 	rendered := renderWorkspaceDiff(diff, 100)
 	plain := ansi.Strip(rendered)
 	if !strings.Contains(plain, "+ ") {
@@ -1183,15 +1157,15 @@ func TestWorkspaceSideBySideDiffDistinguishesBlankLinesFromGaps(t *testing.T) {
 }
 
 func TestWorkspaceSideBySideDiffUsesSeparateSignedRowsAndShadedGaps(t *testing.T) {
-	diff := worktree.Diff{Path: "main.go", Old: []byte("public value"), New: []byte("private value")}
+	diff := worktree.Diff{Path: "main.go", Old: []byte("public value"), New: []byte("private value"), Patch: "@@ -1 +1 @@\n-public value\n+private value\n"}
 	rendered := renderWorkspaceDiff(diff, 100)
 	plain := strings.Split(ansi.Strip(rendered), "\n")
 	var removal, addition int = -1, -1
 	for index, line := range plain {
-		if strings.Contains(line, "- public value") {
+		if strings.Contains(line, "1 - public value") {
 			removal = index
 		}
-		if strings.Contains(line, "+ private value") {
+		if strings.Contains(line, "1 + private value") {
 			addition = index
 		}
 	}
@@ -1212,11 +1186,29 @@ func TestWorkspaceDiffSwitchesLayoutAtWidthBoundary(t *testing.T) {
 		New:   []byte("new\n"),
 		Patch: "@@ -1 +1 @@\n-old\n+new\n",
 	}
-	if rendered := renderWorkspaceDiff(diff, 99); !strings.Contains(rendered, "unified") || strings.Contains(rendered, "side by side") {
+	if rendered := renderWorkspaceDiff(diff, 99); strings.Contains(rendered, "OLD") || !strings.Contains(rendered, "-old") {
 		t.Fatalf("narrow layout = %q", rendered)
 	}
-	if rendered := renderWorkspaceDiff(diff, 100); !strings.Contains(rendered, "side by side") || strings.Contains(rendered, "unified") {
+	if rendered := renderWorkspaceDiff(diff, 100); !strings.Contains(rendered, "OLD") || !strings.Contains(rendered, "NEW") {
 		t.Fatalf("wide layout = %q", rendered)
+	}
+}
+
+func TestWorkspaceDiffUsesSharedProviderRenderer(t *testing.T) {
+	diff := worktree.Diff{
+		Path:  "main.go",
+		Patch: "@@ -7 +7 @@\n-\told value with a long suffix\n+\tnew value with a long suffix\n",
+	}
+	const width = 120
+	workspace := strings.TrimPrefix(renderWorkspaceDiff(diff, width), kittyDeleteImage())
+	file := provider.DiffFile{
+		OldPath: "main.go",
+		NewPath: "main.go",
+		Lines:   provider.ParseUnifiedDiffLines(diff.Patch),
+	}
+	remote := renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width)
+	if workspace != remote {
+		t.Fatalf("Commit tab diff diverged from shared PR/MR renderer:\nworkspace=%q\nremote=%q", workspace, remote)
 	}
 }
 
@@ -1227,8 +1219,8 @@ func TestWorkspaceDiffFallsBackForLargeOneSidedChange(t *testing.T) {
 		Patch: "@@ -0,0 +1 @@\n+large change\n",
 	}
 	rendered := renderWorkspaceDiff(diff, 120)
-	if !strings.Contains(rendered, "unified") || strings.Contains(rendered, "side by side") {
-		t.Fatalf("large one-sided diff did not use bounded layout: %q", ansi.Strip(rendered))
+	if !strings.Contains(rendered, "OLD") || !strings.Contains(rendered, "NEW") || !strings.Contains(rendered, "large change") {
+		t.Fatalf("large one-sided diff did not use the shared split layout: %q", ansi.Strip(rendered))
 	}
 }
 

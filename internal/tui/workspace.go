@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/sys/unix"
 
+	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
@@ -1321,80 +1322,13 @@ func renderWorkspaceDiff(diff worktree.Diff, width int) string {
 	if diff.Binary {
 		return kittyDeleteImage() + sectionTitleStyle.Render(sanitizeWorkspaceLabel(diff.Path)) + "\n" + metaStyle.Render("Binary files differ.")
 	}
-	if width < 100 {
-		return renderUnifiedWorkspaceDiff(diff, width)
+	path := sanitizeWorkspaceLabel(diff.Path)
+	file := provider.DiffFile{
+		OldPath: path,
+		NewPath: path,
+		Lines:   provider.ParseUnifiedDiffLines(sanitizeWorkspaceText(diff.Patch)),
 	}
-	// The nested old/new divider intentionally remains an equal-width rendering
-	// detail. Only the workspace list/preview divider owns a mouse drag target;
-	// a second nested target would conflict with diff review interactions.
-	column := max(12, (width-3)/2)
-	oldText := sanitizeWorkspaceText(strings.ReplaceAll(string(diff.Old), "\r\n", "\n"))
-	newText := sanitizeWorkspaceText(strings.ReplaceAll(string(diff.New), "\r\n", "\n"))
-	oldLines := workspaceDiffLines(oldText)
-	newLines := workspaceDiffLines(newText)
-	highlighter := newCodeHighlighter(diff.Path)
-	if max(len(oldLines), len(newLines)) > 5_000 || len(oldLines)*len(newLines) > 250_000 {
-		return renderUnifiedWorkspaceDiff(diff, width)
-	}
-	rows := []string{sectionTitleStyle.Render(sanitizeWorkspaceLabel(diff.Path) + " · side by side"), metaStyle.Render(padRight("OLD", column) + " │ " + padRight("NEW", column))}
-	for _, pair := range alignDiffLines(oldLines, newLines) {
-		oldLine, newLine := pair.old, pair.new
-		highlightedOld, highlightedNew := highlighter.line(oldLine), highlighter.line(newLine)
-		var left, right string
-		switch {
-		case pair.hasOld && pair.hasNew && oldLine == newLine:
-			left = padRight(truncate("  "+highlightedOld, column), column)
-			right = padRight(truncate("  "+highlightedNew, column), column)
-		case pair.hasOld && !pair.hasNew:
-			left = padRight(renderDiffBackground(truncate("- "+highlightedOld, column), "#482B31"), column)
-			right = diffGapStyle.Render(strings.Repeat(" ", column))
-		case !pair.hasOld && pair.hasNew:
-			left = diffGapStyle.Render(strings.Repeat(" ", column))
-			right = padRight(renderDiffBackground(truncate("+ "+highlightedNew, column), "#203C2F"), column)
-		default:
-			left = padRight(renderDiffBackground(truncate("- "+highlightedOld, column), "#482B31"), column)
-			right = padRight(renderDiffBackground(truncate("+ "+highlightedNew, column), "#203C2F"), column)
-		}
-		rows = append(rows, left+metaStyle.Render(" │ ")+right)
-	}
-	return kittyDeleteImage() + strings.Join(rows, "\n")
-}
-
-func workspaceDiffLines(text string) []string {
-	if text == "" {
-		return nil
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) > 0 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	return lines
-}
-
-func renderUnifiedWorkspaceDiff(diff worktree.Diff, width int) string {
-	patch := strings.TrimSpace(sanitizeWorkspaceText(diff.Patch))
-	if patch == "" {
-		patch = "No textual changes."
-	}
-	lines := strings.Split(patch, "\n")
-	highlighter := newCodeHighlighter(diff.Path)
-	for i, line := range lines {
-		isAddition := strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++")
-		isRemoval := strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---")
-		marker, content := diffLineParts(line)
-		if isAddition || isRemoval || marker == " " {
-			line = marker + highlighter.line(content)
-		}
-		switch {
-		case isAddition:
-			lines[i] = renderDiffBackground(line, "#203C2F")
-		case isRemoval:
-			lines[i] = renderDiffBackground(line, "#482B31")
-		default:
-			lines[i] = metaStyle.Render(line)
-		}
-	}
-	return kittyDeleteImage() + sectionTitleStyle.Render(sanitizeWorkspaceLabel(diff.Path)+" · unified") + "\n" + strings.Join(lines, "\n")
+	return kittyDeleteImage() + renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width)
 }
 
 func diffLineParts(line string) (string, string) {
@@ -1432,59 +1366,6 @@ func sanitizeWorkspaceLabel(value string) string {
 		}
 		return r
 	}, value)
-}
-
-// alignDiffLines uses an LCS to keep insertions and deletions aligned instead
-// of making every following line appear changed. Very large files use a
-// bounded prefix/suffix alignment to avoid quadratic memory growth.
-type alignedDiffLine struct {
-	old, new       string
-	hasOld, hasNew bool
-}
-
-func alignDiffLines(oldLines, newLines []string) []alignedDiffLine {
-	if len(oldLines)*len(newLines) > 250_000 {
-		pairs := make([]alignedDiffLine, 0, max(len(oldLines), len(newLines)))
-		for i := 0; i < max(len(oldLines), len(newLines)); i++ {
-			pair := alignedDiffLine{}
-			if i < len(oldLines) {
-				pair.old, pair.hasOld = oldLines[i], true
-			}
-			if i < len(newLines) {
-				pair.new, pair.hasNew = newLines[i], true
-			}
-			pairs = append(pairs, pair)
-		}
-		return pairs
-	}
-	dp := make([][]int, len(oldLines)+1)
-	for i := range dp {
-		dp[i] = make([]int, len(newLines)+1)
-	}
-	for i := len(oldLines) - 1; i >= 0; i-- {
-		for j := len(newLines) - 1; j >= 0; j-- {
-			if oldLines[i] == newLines[j] {
-				dp[i][j] = dp[i+1][j+1] + 1
-			} else {
-				dp[i][j] = max(dp[i+1][j], dp[i][j+1])
-			}
-		}
-	}
-	pairs := make([]alignedDiffLine, 0, len(oldLines)+len(newLines))
-	for i, j := 0, 0; i < len(oldLines) || j < len(newLines); {
-		switch {
-		case i < len(oldLines) && j < len(newLines) && oldLines[i] == newLines[j]:
-			pairs = append(pairs, alignedDiffLine{old: oldLines[i], new: newLines[j], hasOld: true, hasNew: true})
-			i, j = i+1, j+1
-		case j < len(newLines) && (i == len(oldLines) || dp[i][j+1] > dp[i+1][j]):
-			pairs = append(pairs, alignedDiffLine{new: newLines[j], hasNew: true})
-			j++
-		default:
-			pairs = append(pairs, alignedDiffLine{old: oldLines[i], hasOld: true})
-			i++
-		}
-	}
-	return pairs
 }
 
 func sortedChangeGroups(status worktree.Status, query string) (staged, changes []worktree.Change) {

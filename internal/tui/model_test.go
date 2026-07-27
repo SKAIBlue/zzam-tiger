@@ -742,6 +742,27 @@ func TestNarrowDiffWrapRepeatsGutterAndMapsContinuationRow(t *testing.T) {
 	}
 }
 
+func TestUnifiedDiffFillsChangedRowBackgroundToWidth(t *testing.T) {
+	const width = 50
+	files := []provider.DiffFile{{NewPath: "main.go", Lines: []provider.DiffLine{
+		{OldLine: 1, Text: "-old"},
+		{NewLine: 1, Text: "+new"},
+	}}}
+	rendered := renderDiffFile(files, 0, -1, -1, width)
+	for _, line := range strings.Split(rendered, "\n")[1:] {
+		if got := lipgloss.Width(line); got != width {
+			t.Fatalf("changed unified row width = %d, want %d: %q", got, width, line)
+		}
+		plain := ansi.Strip(line)
+		if strings.Contains(plain, "-old") && !strings.Contains(line, "\x1b[48;2;72;43;49m") {
+			t.Fatalf("removal row did not keep its background: %q", line)
+		}
+		if strings.Contains(plain, "+new") && !strings.Contains(line, "\x1b[48;2;32;60;47m") {
+			t.Fatalf("addition row did not keep its background: %q", line)
+		}
+	}
+}
+
 func TestHighlightedDiffWrapsEveryContinuationWithGutter(t *testing.T) {
 	file := provider.DiffFile{
 		NewPath: "internal/api/auth_test.go",
@@ -1230,8 +1251,7 @@ func TestDiffRangeRendersRangeAndStrongerCursorHighlight(t *testing.T) {
 	if !strings.Contains(got, renderDiffBackground(anchorRow, "#244B6B")) {
 		t.Fatalf("range anchor was not highlighted: %q", got)
 	}
-	cursorRow := addedLineStyle.Render("        3 │ +added")
-	if !strings.Contains(got, renderDiffBackground(cursorRow, "#315F85")) {
+	if !strings.Contains(got, "\x1b[48;2;49;95;133m") || !strings.Contains(ansi.Strip(got), "        3 │ +added") {
 		t.Fatalf("range cursor lacked stronger selection: %q", got)
 	}
 }
@@ -1424,8 +1444,7 @@ func TestDetailDiffDragOpensMultilineComposerWithHighlightedRange(t *testing.T) 
 		t.Fatalf("detail range composer lost selected context: %q", view)
 	}
 	anchorRow := metaStyle.Render("   2    2 │  context")
-	cursorRow := addedLineStyle.Render("        3 │ +added")
-	if !strings.Contains(view, renderDiffBackground(anchorRow, "#244B6B")) || !strings.Contains(view, renderDiffBackground(cursorRow, "#315F85")) {
+	if !strings.Contains(view, renderDiffBackground(anchorRow, "#244B6B")) || !strings.Contains(view, "\x1b[48;2;49;95;133m") {
 		t.Fatalf("detail range composer did not keep both line highlights: %q", view)
 	}
 }
