@@ -69,8 +69,12 @@ func NewWatcher(root string) (*Watcher, error) {
 // the operating system's per-directory watch limit.
 func newPollingWatcher(root string) *Watcher {
 	w := &Watcher{root: filepath.Clean(root), polling: true, updates: make(chan WatchUpdate, 32), done: make(chan struct{})}
-	initial, initialErr := snapshotTree(w.root)
-	go w.poll(initial, initialErr)
+	// Resolve the Git directories again here because this fallback can be
+	// selected before the native watcher has finished its initialization.
+	// Any failure is reported asynchronously so construction remains fast.
+	var resolveErr error
+	w.gitDirs, resolveErr = resolveGitDirs(w.root)
+	go w.poll(nil, resolveErr)
 	return w
 }
 
@@ -168,6 +172,10 @@ type fileStamp struct {
 
 func (w *Watcher) poll(previous map[string]fileStamp, initialErr error) {
 	defer close(w.updates)
+	w.pollLoop(previous, initialErr)
+}
+
+func (w *Watcher) pollLoop(previous map[string]fileStamp, initialErr error) {
 	if initialErr != nil {
 		w.send(WatchUpdate{Err: initialErr})
 	}
@@ -178,12 +186,15 @@ func (w *Watcher) poll(previous map[string]fileStamp, initialErr error) {
 		case <-w.done:
 			return
 		case <-ticker.C:
-			current, err := snapshotTree(w.root)
+			current, err := snapshotTree(w.root, w.gitDirs)
 			if err != nil {
 				w.send(WatchUpdate{Err: err})
 				continue
 			}
-			if !sameSnapshot(previous, current) {
+			// A nil previous snapshot means polling was started asynchronously.
+			// Trigger one refresh after that first scan so changes made during
+			// startup cannot be missed.
+			if previous == nil || !sameSnapshot(previous, current) {
 				previous = current
 				w.send(WatchUpdate{Path: w.root})
 			}
@@ -191,13 +202,35 @@ func (w *Watcher) poll(previous map[string]fileStamp, initialErr error) {
 	}
 }
 
-func snapshotTree(root string) (map[string]fileStamp, error) {
+func snapshotTree(root string, gitDirs []string) (map[string]fileStamp, error) {
 	snapshot := make(map[string]fileStamp)
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	if err := snapshotDirectory(snapshot, root, func(path string, entry os.DirEntry) bool {
+		return path != root && entry.IsDir() && (entry.Name() == ".git" || entry.Type()&os.ModeSymlink != 0)
+	}); err != nil {
+		return nil, err
+	}
+	for _, gitDir := range gitDirs {
+		for _, name := range []string{"HEAD", "index", "packed-refs"} {
+			if err := snapshotFile(snapshot, filepath.Join(gitDir, name)); err != nil {
+				return nil, err
+			}
+		}
+		refs := filepath.Join(gitDir, "refs")
+		if err := snapshotDirectory(snapshot, refs, func(path string, entry os.DirEntry) bool {
+			return path != refs && entry.IsDir() && entry.Type()&os.ModeSymlink != 0
+		}); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	return snapshot, nil
+}
+
+func snapshotDirectory(snapshot map[string]fileStamp, root string, skip func(string, os.DirEntry) bool) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
-		if path != root && entry.IsDir() && (entry.Name() == ".git" || entry.Type()&os.ModeSymlink != 0) {
+		if skip(path, entry) {
 			return filepath.SkipDir
 		}
 		info, err := entry.Info()
@@ -207,7 +240,18 @@ func snapshotTree(root string) (map[string]fileStamp, error) {
 		snapshot[path] = fileStamp{modTime: info.ModTime(), size: info.Size(), mode: info.Mode()}
 		return nil
 	})
-	return snapshot, err
+}
+
+func snapshotFile(snapshot map[string]fileStamp, path string) error {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	snapshot[path] = fileStamp{modTime: info.ModTime(), size: info.Size(), mode: info.Mode()}
+	return nil
 }
 
 func sameSnapshot(left, right map[string]fileStamp) bool {
@@ -230,11 +274,20 @@ func (w *Watcher) run() {
 			return
 		case err, ok := <-w.fs.Errors:
 			if !ok {
+				if w.stopped() {
+					return
+				}
+				w.fallbackToPolling(nil)
 				return
 			}
-			w.send(WatchUpdate{Err: err})
+			w.fallbackToPolling(err)
+			return
 		case event, ok := <-w.fs.Events:
 			if !ok {
+				if w.stopped() {
+					return
+				}
+				w.fallbackToPolling(nil)
 				return
 			}
 			// kqueue may report chmod/attribute notifications when Git only
@@ -247,11 +300,13 @@ func (w *Watcher) run() {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 					if w.insideRoot(event.Name) {
 						if err := w.addTree(event.Name, true); err != nil {
-							w.send(WatchUpdate{Err: err})
+							w.fallbackToPolling(err)
+							return
 						}
 					} else if w.insideGitRefs(event.Name) {
 						if err := w.addTree(event.Name, false); err != nil {
-							w.send(WatchUpdate{Err: err})
+							w.fallbackToPolling(err)
+							return
 						}
 					}
 				}
@@ -260,6 +315,25 @@ func (w *Watcher) run() {
 				w.send(WatchUpdate{Path: event.Name})
 			}
 		}
+	}
+}
+
+func (w *Watcher) fallbackToPolling(_ error) {
+	// Native watcher errors are commonly resource-limit failures. Continuing
+	// with a partially watched tree is worse than switching to a complete,
+	// portable snapshot. Do not surface the native error as fatal: polling has
+	// taken over and will report any errors that actually prevent refreshing.
+	w.polling = true
+	_ = w.fs.Close()
+	w.pollLoop(nil, nil)
+}
+
+func (w *Watcher) stopped() bool {
+	select {
+	case <-w.done:
+		return true
+	default:
+		return false
 	}
 }
 

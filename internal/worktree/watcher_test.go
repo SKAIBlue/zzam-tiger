@@ -2,6 +2,8 @@ package worktree
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
+	"github.com/fsnotify/fsnotify"
 )
 
 func TestWatcherDetectsWorktreeChangesAndNewDirectories(t *testing.T) {
@@ -68,6 +71,57 @@ func TestPollingWatcherDetectsChangesWhenNativeWatchesAreUnavailable(t *testing.
 		t.Fatal(err)
 	}
 	waitForWatchPath(t, w, root)
+}
+
+func TestPollingWatcherDetectsGitMetadataChanges(t *testing.T) {
+	root := initWatcherRepo(t)
+	w := newPollingWatcher(root)
+	defer w.Close()
+
+	// Consume the asynchronous initial snapshot refresh.
+	waitForWatchPath(t, w, root)
+	runGit(t, root, "branch", "polled-topic")
+	waitForWatchPath(t, w, root)
+}
+
+func TestPollingWatcherConstructionDoesNotWaitForInitialSnapshot(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 100; i++ {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("dir-%d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	started := time.Now()
+	w := newPollingWatcher(root)
+	defer w.Close()
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("polling watcher construction took %v", elapsed)
+	}
+}
+
+func TestNativeWatcherFailureFallsBackToPolling(t *testing.T) {
+	root := initWatcherRepo(t)
+	fs, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &Watcher{
+		fs:      fs,
+		root:    root,
+		gitDirs: mustResolveGitDirs(t, root),
+		updates: make(chan WatchUpdate, 32),
+		done:    make(chan struct{}),
+	}
+	go func() {
+		defer close(w.updates)
+		w.fallbackToPolling(errors.New("native watch limit reached"))
+	}()
+	defer w.Close()
+
+	waitForWatchPath(t, w, root)
+	if !w.polling {
+		t.Fatal("watcher did not switch to polling")
+	}
 }
 
 func TestWatcherDetectsGitIndexHeadAndRefs(t *testing.T) {
@@ -211,6 +265,15 @@ func initWatcherRepo(t *testing.T) string {
 	runGit(t, root, "add", "tracked.txt")
 	runGit(t, root, "commit", "-m", "initial")
 	return root
+}
+
+func mustResolveGitDirs(t *testing.T, root string) []string {
+	t.Helper()
+	dirs, err := resolveGitDirs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dirs
 }
 
 func runGit(t *testing.T, root string, args ...string) {

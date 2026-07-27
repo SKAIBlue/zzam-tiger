@@ -216,6 +216,7 @@ func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
 	m.loadingList = false
 	m.workspaceLoading = false
 	m.workspacePreviewLoading = false
+	m.workspacePreviewErr = nil
 	m.workspacePreviewRequest++
 	m.err = nil
 	if m.localTab() {
@@ -353,6 +354,8 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 	if msg.err != nil {
 		if msg.op == "file" || msg.op == "image" || msg.op == "diff" || msg.op == "diff-render" {
 			m.workspacePreviewLoading = false
+			m.workspacePreviewErr = msg.err
+			return m.finishWorkspaceLoad(nil)
 		} else if msg.op == "entries" {
 			m.workspaceEntryPending = max(0, m.workspaceEntryPending-1)
 			m.workspaceLoading = m.workspaceEntryPending > 0
@@ -361,6 +364,9 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		}
 		m.err = msg.err
 		return m.finishWorkspaceLoad(nil)
+	}
+	if msg.op == "file" || msg.op == "image" || msg.op == "diff" || msg.op == "diff-render" {
+		m.workspacePreviewErr = nil
 	}
 	m.err = nil
 	m.lastUpdated = time.Now()
@@ -489,6 +495,7 @@ func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Mo
 
 func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 	m.workspacePreviewLoading = false
+	m.workspacePreviewErr = nil
 	m.workspacePreviewRequest++
 	m.workspaceImage = ""
 	m.workspaceImageWidth = 0
@@ -930,6 +937,7 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+	msg = normalizeShortcutKey(msg)
 	if m.actionBusy {
 		return m, nil
 	}

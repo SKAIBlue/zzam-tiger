@@ -105,14 +105,14 @@ func (m Model) listView() string {
 	if m.remoteErr == nil && m.workspace != nil && m.kind() == provider.Commits {
 		query := m.graphFilter.View()
 		if !m.graphFilter.Focused() && m.graphFilter.Value() == "" {
-			query = metaStyle.Render("Search: press / to search")
+			query = metaStyle.Render("Filter: press / to search")
 		}
 		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
 		lines = append(lines, m.filtersView())
 	} else if m.remoteErr == nil || m.workspace != nil && m.kind() == provider.Branches {
 		query := m.graphQuery.View()
 		if !m.graphQuery.Focused() && m.graphQuery.Value() == "" {
-			query = metaStyle.Render("Search: press / to search")
+			query = metaStyle.Render("Filter: press / to search")
 		}
 		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
 		lines = append(lines, m.filtersView())
@@ -221,7 +221,7 @@ func (m Model) workspaceView() string {
 		if value == "" {
 			value = metaStyle.Render("press / to filter paths")
 		}
-		filter = "Search: " + value
+		filter = "Filter: " + value
 	}
 	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
 	if m.workspaceCommitActive() {
@@ -234,7 +234,9 @@ func (m Model) workspaceView() string {
 	leftWidth, rightWidth := m.workspacePaneWidths()
 	left := m.workspaceList(leftWidth, bodyHeight)
 	right := ""
-	if m.workspaceFilesActive() {
+	if m.workspacePreviewErr != nil {
+		right = errorStyle.Render("Unable to load preview: " + truncate(sanitizeWorkspaceLabel(m.workspacePreviewErr.Error()), max(1, rightWidth-24)))
+	} else if m.workspaceFilesActive() {
 		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightWidth, bodyHeight, m.workspacePreviewOffset)
 	} else {
 		if len(m.workspaceDiffRows) == 0 {

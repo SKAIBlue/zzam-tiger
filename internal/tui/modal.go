@@ -169,6 +169,10 @@ func (m Model) updateModal(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.focusModalControl(), nil
 	}
 	itemIndex := controls[m.modal.focus]
+	if itemIndex < 0 || m.modal.request.Items[itemIndex].Type != "input" {
+		msg = normalizeShortcutKey(msg)
+		key = msg.String()
+	}
 	if itemIndex == -2 {
 		if key == "enter" || key == " " || key == "n" {
 			return m.closeModal(false, "")

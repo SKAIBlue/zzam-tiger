@@ -29,6 +29,7 @@ type fakeWorkspace struct {
 	files        map[string]worktree.File
 	status       worktree.Status
 	diffs        map[string]worktree.Diff
+	diffErrs     map[string]error
 	staged       []string
 	unstaged     []string
 	stageAll     int
@@ -156,6 +157,9 @@ func (w *fakeWorkspace) Commit(_ context.Context, message string) error {
 	return nil
 }
 func (w *fakeWorkspace) Diff(_ context.Context, path string, _ bool) (worktree.Diff, error) {
+	if err := w.diffErrs[path]; err != nil {
+		return worktree.Diff{}, err
+	}
 	return w.diffs[path], nil
 }
 func (w *fakeWorkspace) History(context.Context, int) ([]worktree.Commit, error) {
@@ -545,7 +549,7 @@ func TestArrowFocusFlowAcrossTabsGraphAndWorkspacePreview(t *testing.T) {
 	m.active = 2 // Graph follows Commit and Files.
 	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "first", Paths: []string{"one.go"}}}
 	graphView := ansi.Strip(m.View())
-	if !strings.Contains(graphView, "Zzam Tiger") || !strings.Contains(graphView, "Graph") || !strings.Contains(graphView, "All") || !strings.Contains(graphView, "Search:") {
+	if !strings.Contains(graphView, "Zzam Tiger") || !strings.Contains(graphView, "Graph") || !strings.Contains(graphView, "All") || !strings.Contains(graphView, "Filter:") {
 		t.Fatalf("Graph lost its title, scope status, or search row: %q", graphView)
 	}
 	if rawGraphView := m.View(); strings.Contains(rawGraphView, "\x1b_Ga=d") {
@@ -998,6 +1002,39 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 	m = updated.(Model)
 	if cmd == nil || m.workspaceCursor != 1 {
 		t.Fatalf("change click selected cursor %d with cmd=%v", m.workspaceCursor, cmd != nil)
+	}
+}
+
+func TestWorkspaceCommitPreviewErrorKeepsFileListInteractive(t *testing.T) {
+	previewErr := errors.New("large.bin exceeds the 8 MiB diff preview limit")
+	workspace := &fakeWorkspace{
+		diffs:    map[string]worktree.Diff{"small.go": {Path: "small.go"}},
+		diffErrs: map[string]error{"large.bin": previewErr},
+	}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 120, 20
+	m.workspaceStatus.Unstaged = []worktree.Change{
+		{Path: "large.bin", Code: 'M'},
+		{Path: "small.go", Code: 'M'},
+	}
+	m.workspaceLoading = false
+	m.workspacePreviewRequest = 1
+
+	updated, _ := m.Update(workspaceResultMsg{request: 1, op: "diff", err: previewErr})
+	m = updated.(Model)
+	if m.err != nil || !errors.Is(m.workspacePreviewErr, previewErr) {
+		t.Fatalf("preview error state: global=%v preview=%v", m.err, m.workspacePreviewErr)
+	}
+	view := m.View()
+	if !strings.Contains(view, "large.bin") || !strings.Contains(view, "small.go") || !strings.Contains(view, "Unable to load preview") {
+		t.Fatalf("preview error replaced the file list:\n%s", view)
+	}
+
+	// Row 5 is the group header, row 6 is large.bin, and row 7 is small.go.
+	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil || m.workspaceCursor != 1 || m.workspacePreviewErr != nil {
+		t.Fatalf("file click after preview error: cmd=%v cursor=%d previewErr=%v", cmd != nil, m.workspaceCursor, m.workspacePreviewErr)
 	}
 }
 

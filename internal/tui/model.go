@@ -188,6 +188,7 @@ type Model struct {
 	workspacePreviewRequest  uint64
 	workspaceLoading         bool
 	workspacePreviewLoading  bool
+	workspacePreviewErr      error
 	workspaceExpanded        map[string]bool
 	workspaceLoaded          map[string]bool
 	workspaceChangeCollapsed map[string]bool
@@ -256,11 +257,11 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	comment.SetWidth(66)
 	comment.SetHeight(8)
 	fileFilter := textinput.New()
-	fileFilter.Prompt = "Search: "
+	fileFilter.Prompt = "Filter: "
 	fileFilter.Placeholder = "type to filter files"
 	fileFilter.CharLimit = 300
 	graphQuery := textinput.New()
-	graphQuery.Prompt = "Search: "
+	graphQuery.Prompt = "Filter: "
 	graphQuery.Placeholder = "type to filter"
 	graphQuery.CharLimit = 300
 	commitMessage := textinput.New()
@@ -1064,6 +1065,7 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampSelection(m.kind())
 		return m, cmd
 	}
+	msg = normalizeShortcutKey(msg)
 	if m.actionBusy {
 		if msg.String() == "q" {
 			return m, tea.Quit
@@ -1368,6 +1370,7 @@ func filterBranchItems(items []provider.Item, scope string) []provider.Item {
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	msg = normalizeShortcutKey(msg)
 	if m.actionBusy {
 		if msg.String() == "q" {
 			return m, tea.Quit
@@ -1454,6 +1457,7 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	msg = normalizeShortcutKey(msg)
 	if m.actionBusy {
 		return m, nil
 	}
