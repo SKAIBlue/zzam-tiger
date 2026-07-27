@@ -509,18 +509,105 @@ func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
 	m.graphFilter.SetValue("")
 	update, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	m = update.(Model)
-	if m.graphDepth != graphFileDepth || m.graphFile != 0 {
-		t.Fatalf("right = depth %v file %d", m.graphDepth, m.graphFile)
+	if m.graphDepth != graphCommitDepth || m.cursor[provider.Commits] != 0 {
+		t.Fatalf("right moved Graph focus: depth=%v cursor=%d", m.graphDepth, m.cursor[provider.Commits])
 	}
-	update, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = update.(Model)
-	if m.graphFile != 1 {
-		t.Fatalf("down = file %d, want 1", m.graphFile)
+}
+
+func TestGraphChangedFilesUseTreeBox(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active = 4
+	m.width, m.height, m.loadingList = 40, 24, false
+	m.items[provider.Commits] = []provider.Item{{
+		ID: "one", Title: "boxed files", Parents: []string{"base"}, Paths: []string{
+			"internal/tui/file_icons.go", "internal/tui/file_icons_test.go", "internal/tui/model.go",
+			"internal/tui/model_test.go", "internal/tui/view.go", "internal/tui/workspace.go", "internal/tui/workspace_test.go",
+		},
+	}}
+
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("changed files are not enclosed by a box:\n%s", view)
 	}
-	update, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
-	m = update.(Model)
-	if m.graphDepth != graphCommitDepth || m.cursor[provider.Commits] != 1 {
-		t.Fatalf("last-file down = depth %v cursor %d", m.graphDepth, m.cursor[provider.Commits])
+	for _, want := range []string{"▾", "internal/tui", "file_icons.go", "view.go", "workspace_test.go"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("changed-files tree is missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "▾ internal ") || strings.Contains(view, "▾ tui ") {
+		t.Fatalf("single-child directories were not compressed:\n%s", view)
+	}
+	foundCompressedDirectoryRow := false
+	for _, line := range strings.Split(view, "\n") {
+		if strings.Contains(line, "internal/tui") {
+			foundCompressedDirectoryRow = strings.Contains(line, "▾") && strings.Contains(line, directoryOpenIcon)
+			break
+		}
+	}
+	if !foundCompressedDirectoryRow {
+		t.Fatalf("compressed directory label wrapped away from its icon:\n%s", view)
+	}
+	boxedRows := m.graphFileRows(m.items[provider.Commits][0])
+	wantTreeRows := graphTreeRows(graphFilePaths(m.items[provider.Commits][0]))
+	wantRows := len(wantTreeRows) + 2
+	if len(boxedRows) != wantRows {
+		t.Fatalf("tree box reflowed rows: got=%d want=%d\n%s", len(boxedRows), wantRows, ansi.Strip(strings.Join(boxedRows, "\n")))
+	}
+	for index, row := range boxedRows {
+		if width := lipgloss.Width(row); width != m.width {
+			t.Fatalf("tree box row %d leaves outer margin: width=%d want=%d", index, width, m.width)
+		}
+	}
+	for index, want := range wantTreeRows {
+		line := ansi.Strip(boxedRows[index+1])
+		left := strings.Index(line, "│")
+		right := strings.LastIndex(line, "│")
+		if left < 0 || right <= left {
+			t.Fatalf("tree body row %d has invalid borders: %q", index, line)
+		}
+		body := line[left+len("│") : right]
+		if len(body) == 0 || body[0] != ' ' {
+			t.Fatalf("tree body row %d is missing left padding: %q", index, line)
+		}
+		if got := strings.TrimRight(body[1:], " "); got != want {
+			t.Fatalf("tree body row %d reflowed: got=%q want=%q\n%s", index, got, want, ansi.Strip(strings.Join(boxedRows, "\n")))
+		}
+	}
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Fatalf("focused changed-files row width = %d, want <= %d: %q", width, m.width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestGraphChangedFileTreeStopsCompressionAtBranches(t *testing.T) {
+	rows := graphTreeRows([]string{"internal/provider/api.go", "internal/tui/model.go", "internal/tui/view.go"})
+	view := strings.Join(rows, "\n")
+	for _, want := range []string{"internal", "provider", "tui", "model.go", "view.go"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("branched tree is missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "internal/provider") || strings.Contains(view, "internal/tui") {
+		t.Fatalf("tree compressed across a branching directory:\n%s", view)
+	}
+}
+
+func TestGraphTreeConsecutiveFramesClearPreviousCommit(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active, m.width, m.height, m.loadingList = 4, 60, 20, false
+	m.items[provider.Commits] = []provider.Item{
+		{ID: "one", Title: "large tree", Parents: []string{"two"}, Paths: []string{"internal/tui/file_icons.go", "internal/tui/workspace_test.go"}},
+		{ID: "two", Title: "small tree", Paths: []string{"README.md"}},
+	}
+	_ = m.View()
+	m.cursor[provider.Commits] = 1
+	next := ansi.Strip(m.View())
+	if strings.Contains(next, "file_icons.go") || strings.Contains(next, "workspace_test.go") {
+		t.Fatalf("previous commit tree leaked into the next frame:\n%s", next)
+	}
+	if !strings.Contains(next, "README.md") {
+		t.Fatalf("next frame is missing its selected commit file:\n%s", next)
 	}
 }
 

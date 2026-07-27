@@ -817,7 +817,17 @@ func parseHistory(data []byte) ([]Commit, error) {
 			parents = strings.Fields(string(fields[1]))
 		}
 		paths := make([]string, 0, len(fields)-6)
+		firstPath := true
 		for _, path := range fields[6:] {
+			if len(path) == 0 {
+				continue
+			}
+			// Git writes one record-separating newline between the pretty format
+			// and the first --name-only path. It is not part of the filename.
+			if firstPath {
+				path = bytes.TrimPrefix(path, []byte{'\n'})
+				firstPath = false
+			}
 			if len(path) > 0 {
 				paths = append(paths, string(path))
 			}

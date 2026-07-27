@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -126,7 +127,6 @@ func (m Model) listView() string {
 		lines = append(lines, metaStyle.Render(" Local Git features unavailable: "+truncate(sanitizeWorkspaceLabel(m.localErr.Error()), max(1, m.width-34))))
 	}
 	lines = append(lines, "")
-
 	items := m.visibleListItems()
 	if m.remoteErr != nil && !m.localGitList(m.kind()) {
 		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.remoteErr.Error()), max(1, m.width-2))))
@@ -576,15 +576,78 @@ func (m Model) graphFileRows(item provider.Item) []string {
 	if len(item.Paths) == 0 {
 		return nil
 	}
-	rows := make([]string, 0, len(item.Paths))
-	for i, path := range item.Paths {
-		row := "    " + m.highlightSearchMatch(path)
-		if m.graphDepth == graphFileDepth && i == m.graphFile {
-			row = selectedRow.Render(row)
-		}
-		rows = append(rows, truncate(row, max(1, m.width)))
+	paths := graphFilePaths(item)
+	const indent = "   "
+	// Fill the terminal width after accounting for the left indent, two border
+	// cells, and the box's horizontal padding.
+	contentWidth := max(1, m.width-lipgloss.Width(indent)-4)
+	rows := graphTreeRows(paths)
+	boxContentWidth := contentWidth
+	for index, row := range rows {
+		rows[index] = truncate(m.highlightSearchMatch(row), contentWidth)
 	}
+	// Build each bordered line independently. Lip Gloss multiline styles can
+	// reflow only the first content row when its width and padding interact;
+	// direct line assembly guarantees that tree rows are never split.
+	boxedRows := make([]string, 0, len(rows)+2)
+	boxedRows = append(boxedRows, indent+"╭"+strings.Repeat("─", boxContentWidth+2)+"╮")
+	for _, row := range rows {
+		boxedRows = append(boxedRows, indent+"│ "+padRight(row, boxContentWidth)+" │")
+	}
+	boxedRows = append(boxedRows, indent+"╰"+strings.Repeat("─", boxContentWidth+2)+"╯")
+	return boxedRows
+}
+
+type graphTreeNode struct {
+	dirs  map[string]*graphTreeNode
+	files []string
+}
+
+func graphTreeRows(paths []string) []string {
+	root := &graphTreeNode{dirs: make(map[string]*graphTreeNode)}
+	for _, path := range paths {
+		parts := strings.Split(path, "/")
+		node := root
+		for _, dir := range parts[:len(parts)-1] {
+			if node.dirs[dir] == nil {
+				node.dirs[dir] = &graphTreeNode{dirs: make(map[string]*graphTreeNode)}
+			}
+			node = node.dirs[dir]
+		}
+		node.files = append(node.files, parts[len(parts)-1])
+	}
+	rows := make([]string, 0, len(paths))
+	var render func(*graphTreeNode, int)
+	render = func(node *graphTreeNode, depth int) {
+		dirs := make([]string, 0, len(node.dirs))
+		for name := range node.dirs {
+			dirs = append(dirs, name)
+		}
+		sort.Strings(dirs)
+		for _, name := range dirs {
+			child, label := node.dirs[name], name
+			for len(child.files) == 0 && len(child.dirs) == 1 {
+				for nextName, next := range child.dirs {
+					label += "/" + nextName
+					child = next
+				}
+			}
+			rows = append(rows, strings.Repeat("  ", depth)+"▾ "+directoryOpenIcon+" "+label)
+			render(child, depth+1)
+		}
+		sort.Strings(node.files)
+		for _, name := range node.files {
+			rows = append(rows, strings.Repeat("  ", depth)+"  "+workspaceFileIcon(name)+" "+name)
+		}
+	}
+	render(root, 0)
 	return rows
+}
+
+func graphFilePaths(item provider.Item) []string {
+	paths := append([]string(nil), item.Paths...)
+	sort.Strings(paths)
+	return paths
 }
 
 func commitGraphPrefixes(items []provider.Item) []string {

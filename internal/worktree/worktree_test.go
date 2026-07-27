@@ -347,7 +347,7 @@ func TestBranchManagementOperations(t *testing.T) {
 
 func TestHistoryUsesBoundedAllRefsCommandAndParsesNULFields(t *testing.T) {
 	when := "2026-07-23T10:20:30+09:00"
-	logOutput := []byte("\x1echild\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00author@example.com\x00" + when + "\x00old name.txt\x00new name.txt\x00")
+	logOutput := []byte("\x1echild\x00parent-a parent-b\x00subject with spaces\x00Test Author\x00author@example.com\x00" + when + "\x00\x00\nold name.txt\x00new name.txt\x00")
 	refsOutput := []byte("child\x00\x00refs/heads/main\x00*\x00\nchild\x00\x00refs/remotes/origin/main\x00 \x00\n" +
 		"child\x00\x00refs/remotes/origin/HEAD\x00 \x00refs/remotes/origin/main\n" +
 		"tag-object\x00child\x00refs/tags/v1.0.0\x00 \x00\n")

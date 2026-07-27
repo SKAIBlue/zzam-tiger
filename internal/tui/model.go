@@ -1098,10 +1098,6 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startActiveTabLoad()
 		}
 	case "left", "h":
-		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
-			m.graphDepth = graphCommitDepth
-			return m, nil
-		}
 		if m.workspace != nil && m.kind() == provider.Commits {
 			m.graphAuthorScope = (m.graphAuthorScope + 2) % 3
 			m.loadingList = false
@@ -1110,11 +1106,6 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.changeFilter(-1)
 	case "right", "l":
 		if m.kind() == provider.Commits {
-			if item, ok := m.currentListItem(); ok && len(item.Paths) > 0 {
-				m.graphDepth, m.graphFile = graphFileDepth, 0
-			} else {
-				m.status = "no changed files available"
-			}
 			return m, nil
 		}
 		return m.changeFilter(1)
@@ -1164,25 +1155,8 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.startGraphAction(msg.String())
 		}
 	case "up", "k":
-		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
-			if m.graphFile == 0 {
-				m.graphDepth = graphCommitDepth
-			} else {
-				m.graphFile--
-			}
-			return m, nil
-		}
 		m.moveCursor(-1)
 	case "down", "j":
-		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
-			if item, ok := m.currentListItem(); ok && m.graphFile < len(item.Paths)-1 {
-				m.graphFile++
-				return m, nil
-			}
-			m.graphDepth = graphCommitDepth
-			m.moveCursor(1)
-			return m, nil
-		}
 		m.moveCursor(1)
 	case "home":
 		m.cursor[m.kind()] = 0
@@ -1194,10 +1168,6 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		}
 	case "enter":
-		if m.kind() == provider.Commits && m.graphDepth == graphFileDepth {
-			m.status = "historical file details are not available yet"
-			return m, nil
-		}
 		return m.openSelected()
 	case "c", "C":
 		if item, ok := m.currentListItem(); ok && m.kind() == provider.Issues {
