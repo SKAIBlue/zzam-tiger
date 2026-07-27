@@ -426,7 +426,16 @@ func (m Model) workspaceList(width, height int) string {
 func (m Model) filtersView() string {
 	if m.workspace != nil && m.kind() == provider.Commits {
 		scopes := []string{"All", "Mine", "Others"}
-		return " " + activeFilter.Render(" "+scopes[m.graphAuthorScope]+" ")
+		parts := make([]string, 0, len(scopes))
+		for index, scope := range scopes {
+			label := " " + scope + " "
+			if index == m.graphAuthorScope {
+				parts = append(parts, activeFilter.Render(label))
+			} else {
+				parts = append(parts, filterStyle.Render(label))
+			}
+		}
+		return " " + strings.Join(parts, " ")
 	}
 	filters := m.filters()
 	parts := make([]string, 0, len(filters))

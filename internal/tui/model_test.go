@@ -222,6 +222,23 @@ func TestUpdateButtonAppearsAndStartsInstaller(t *testing.T) {
 	}
 }
 
+func TestFilterTabsCanBeClickedBelowSearch(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height = 80, 20
+	m.resizeViewport()
+	m.screen = listScreen
+	if got := m.filterAt(9); got != 1 {
+		t.Fatalf("filterAt(9) = %d, want Merged filter index 1", got)
+	}
+	updated, cmd := m.Update(tea.MouseMsg{
+		X: 9, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress,
+	})
+	m = updated.(Model)
+	if m.filterIndex[provider.PullRequests] != 1 || cmd == nil {
+		t.Fatalf("filter click selected index=%d command=%v", m.filterIndex[provider.PullRequests], cmd != nil)
+	}
+}
+
 func TestHeaderUsesProductNameAndVersion(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.currentVersion = "v1.2.3"

@@ -2504,9 +2504,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen != listScreen {
 		return m, nil
 	}
-	if msg.Y == 3 {
+	if msg.Y == 4 {
 		if filter := m.filterAt(msg.X); filter >= 0 {
-			m.filterIndex[m.kind()] = filter
+			if m.workspace != nil && m.kind() == provider.Commits {
+				m.graphAuthorScope = filter
+			} else {
+				m.filterIndex[m.kind()] = filter
+			}
 			m.cursor[m.kind()], m.offset[m.kind()] = 0, 0
 			m.loadingList = false
 			return m.startListLoad()
@@ -2634,9 +2638,17 @@ func (m Model) filterAt(x int) int {
 	if m.remoteErr != nil && !(m.workspace != nil && m.kind() == provider.Branches) {
 		return -1
 	}
+	labels := make([]string, 0)
+	if m.workspace != nil && m.kind() == provider.Commits {
+		labels = []string{"All", "Mine", "Others"}
+	} else {
+		for _, filter := range m.filters() {
+			labels = append(labels, filter.Label)
+		}
+	}
 	position := 1
-	for index, filter := range m.filters() {
-		label := " " + filter.Label + " "
+	for index, labelText := range labels {
+		label := " " + labelText + " "
 		end := position + lipgloss.Width(label)
 		if x >= position && x < end {
 			return index

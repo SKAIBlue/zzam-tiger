@@ -418,6 +418,24 @@ func TestWorkspaceThirdTabLoadsCommitGraph(t *testing.T) {
 	}
 }
 
+func TestCommitAuthorScopeTabsRenderAndCanBeClicked(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = 2
+	m.width, m.height = 100, 24
+	m.resizeViewport()
+	plain := ansi.Strip(m.filtersView())
+	for _, label := range []string{"All", "Mine", "Others"} {
+		if !strings.Contains(plain, label) {
+			t.Fatalf("author scope tabs missing %q: %q", label, plain)
+		}
+	}
+	updated, cmd := m.Update(tea.MouseMsg{X: 8, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.graphAuthorScope != 1 || cmd == nil {
+		t.Fatalf("Mine click selected scope=%d command=%v", m.graphAuthorScope, cmd != nil)
+	}
+}
+
 func TestWorkspaceGraphLoadsLocalAndRemoteRefs(t *testing.T) {
 	workspace := &fakeWorkspace{history: []worktree.Commit{{
 		SHA: "abcdef123456", Subject: "merge feature", Author: "Ada", Parents: []string{"parent-a", "parent-b"},
