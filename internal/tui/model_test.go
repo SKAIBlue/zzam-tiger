@@ -231,7 +231,7 @@ func TestFilterTabsCanBeClickedBelowSearch(t *testing.T) {
 		t.Fatalf("filterAt(9) = %d, want Merged filter index 1", got)
 	}
 	updated, cmd := m.Update(tea.MouseMsg{
-		X: 9, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress,
+		X: 10, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress,
 	})
 	m = updated.(Model)
 	if m.filterIndex[provider.PullRequests] != 1 || cmd == nil {
@@ -245,7 +245,7 @@ func TestListClickUsesRenderedItemStartRow(t *testing.T) {
 	m.resizeViewport()
 	m.screen = listScreen
 	m.items[provider.PullRequests] = []provider.Item{{ID: "first", Title: "First"}, {ID: "second", Title: "Second"}}
-	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if m.cursor[provider.PullRequests] != 0 || m.selected.ID != "first" || cmd == nil {
 		t.Fatalf("first rendered row selected cursor=%d item=%q command=%v", m.cursor[provider.PullRequests], m.selected.ID, cmd != nil)
@@ -442,8 +442,8 @@ func TestSlashOpensUnifiedSearchAndEnterMovesToResults(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	if m.graphQuery.Focused() || m.focus != focusListItems {
-		t.Fatalf("enter did not move to results: input=%t focus=%v", m.graphQuery.Focused(), m.focus)
+	if m.graphQuery.Focused() || m.focus != focusListFilters {
+		t.Fatalf("enter did not move to filter options: input=%t focus=%v", m.graphQuery.Focused(), m.focus)
 	}
 }
 
@@ -492,7 +492,7 @@ func TestLocalGraphSearchHighlightUsesGraphFilter(t *testing.T) {
 	}
 }
 
-func TestFirstResultUpReturnsToSearchAcrossStandardListTabs(t *testing.T) {
+func TestFirstResultUpReturnsToFiltersAcrossStandardListTabs(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		active int
@@ -510,10 +510,34 @@ func TestFirstResultUpReturnsToSearchAcrossStandardListTabs(t *testing.T) {
 			m.items[tc.kind] = []provider.Item{{ID: "first", Title: "first"}}
 			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 			m = updated.(Model)
-			if m.focus != focusListSearch || !m.graphQuery.Focused() {
-				t.Fatalf("first-result up did not focus search: focus=%v input=%t", m.focus, m.graphQuery.Focused())
+			if m.focus != focusListFilters || m.graphQuery.Focused() {
+				t.Fatalf("first-result up did not focus filters: focus=%v input=%t", m.focus, m.graphQuery.Focused())
 			}
 		})
+	}
+}
+
+func TestStandardListKeyboardFocusMovesThroughFilterOptions(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.width, m.height, m.loadingList = 80, 16, false
+	m.items[provider.PullRequests] = []provider.Item{{ID: "first", Title: "first"}}
+	m.focus = focusListSearch
+	m.graphQuery.Focus()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusListFilters || m.graphQuery.Focused() {
+		t.Fatalf("search down focus=%v input=%t, want filter options", m.focus, m.graphQuery.Focused())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.filterIndex[provider.PullRequests] != 1 {
+		t.Fatalf("filter options right selected %d, want 1", m.filterIndex[provider.PullRequests])
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusListItems {
+		t.Fatalf("filter options down focus=%v, want results", m.focus)
 	}
 }
 

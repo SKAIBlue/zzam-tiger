@@ -38,6 +38,9 @@ type fakeWorkspace struct {
 	history      []worktree.Commit
 	branches     []worktree.Branch
 	branchCalls  []string
+	remote       worktree.RemoteState
+	pulls        int
+	pushes       int
 }
 
 type fakeWorkspaceWatcher struct {
@@ -152,6 +155,11 @@ func (w *fakeWorkspace) Unstage(_ context.Context, path string) error {
 	return nil
 }
 func (w *fakeWorkspace) UnstageAll(context.Context) error { w.unstageAll++; return nil }
+func (w *fakeWorkspace) RemoteState(context.Context) (worktree.RemoteState, error) {
+	return w.remote, nil
+}
+func (w *fakeWorkspace) Pull(context.Context) error { w.pulls++; return nil }
+func (w *fakeWorkspace) Push(context.Context) error { w.pushes++; return nil }
 func (w *fakeWorkspace) Commit(_ context.Context, message string) error {
 	w.commits = append(w.commits, message)
 	return nil
@@ -429,7 +437,7 @@ func TestCommitAuthorScopeTabsRenderAndCanBeClicked(t *testing.T) {
 			t.Fatalf("author scope tabs missing %q: %q", label, plain)
 		}
 	}
-	updated, cmd := m.Update(tea.MouseMsg{X: 8, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd := m.Update(tea.MouseMsg{X: 9, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if m.graphAuthorScope != 1 || cmd == nil {
 		t.Fatalf("Mine click selected scope=%d command=%v", m.graphAuthorScope, cmd != nil)
@@ -462,7 +470,7 @@ func TestWorkspaceGraphLoadsLocalAndRemoteRefs(t *testing.T) {
 func TestGraphViewShowsForkMergeAndBranchTips(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.active = 4 // Graph in the remote-only tab order.
-	m.width, m.height = 120, 12
+	m.width, m.height = 120, 16
 	m.loadingList = false
 	m.items[provider.Commits] = []provider.Item{
 		{ID: "merge", Title: "merge feature", Parents: []string{"main", "feature"}, Refs: []provider.CommitRef{{Name: "main", Head: true}, {Name: "origin/main", Remote: true}, {Name: "v0.0.3", Tag: true}}},
@@ -706,20 +714,25 @@ func TestArrowFocusFlowAcrossTabsGraphAndWorkspacePreview(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(Model)
+	if m.focus != focusGraphFilters || m.graphFilter.Focused() {
+		t.Fatalf("search down did not focus author filters: focus=%v input=%t", m.focus, m.graphFilter.Focused())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
 	if m.focus != focusGraphCommits {
 		t.Fatalf("filter down focus = %v, want graph commits", m.focus)
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = updated.(Model)
-	if m.focus != focusGraphFilters || !m.graphFilter.Focused() {
-		t.Fatalf("first commit up did not focus Graph search: focus=%v input=%t", m.focus, m.graphFilter.Focused())
+	if m.focus != focusGraphFilters || m.graphFilter.Focused() {
+		t.Fatalf("first commit up did not focus Graph author filters: focus=%v input=%t", m.focus, m.graphFilter.Focused())
 	}
 	m.graphFilter.Blur()
 	m.focus, m.graphDepth, m.graphFile = focusListItems, graphFileDepth, 0
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = updated.(Model)
-	if m.focus != focusGraphFilters || !m.graphFilter.Focused() || m.graphDepth != graphCommitDepth {
-		t.Fatalf("first Graph file up did not focus search: focus=%v input=%t depth=%v", m.focus, m.graphFilter.Focused(), m.graphDepth)
+	if m.focus != focusGraphFilters || m.graphFilter.Focused() || m.graphDepth != graphCommitDepth {
+		t.Fatalf("first Graph file up did not focus author filters: focus=%v input=%t depth=%v", m.focus, m.graphFilter.Focused(), m.graphDepth)
 	}
 
 	m.active = workspaceCommitTab
@@ -729,12 +742,12 @@ func TestArrowFocusFlowAcrossTabsGraphAndWorkspacePreview(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(Model)
 	if m.focus != focusFileFilter || !m.fileFilter.Focused() {
-		t.Fatalf("commit tab down did not focus search: focus=%v input=%t", m.focus, m.fileFilter.Focused())
+		t.Fatalf("commit tab down did not focus Filter: focus=%v input=%t", m.focus, m.fileFilter.Focused())
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(Model)
 	if m.focus != focusCommitMessage || !m.commitMessage.Focused() {
-		t.Fatalf("search down did not focus message: focus=%v input=%t", m.focus, m.commitMessage.Focused())
+		t.Fatalf("Filter down did not focus message: focus=%v input=%t", m.focus, m.commitMessage.Focused())
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = updated.(Model)
@@ -851,6 +864,109 @@ func TestTabBarKeepsActiveTabVisibleAtNarrowWidths(t *testing.T) {
 		if !strings.Contains(ansi.Strip(bar), fmt.Sprintf(" %d %s ", active+1, m.tabLabels()[active])) {
 			t.Fatalf("active %d missing from tab bar %q", active, bar)
 		}
+		plain := ansi.Strip(bar)
+		if !strings.HasPrefix(plain, "╭") || !strings.Contains(plain, "├") {
+			t.Fatalf("active %d tab bar does not have a rounded box: %q", active, plain)
+		}
+	}
+}
+
+func TestRoundedTabBoxKeepsStatusAndHelpVisible(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceFilesTab
+	m.width, m.height = 80, 14
+	m.status = "Ready"
+
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("view height = %d, want %d", len(lines), m.height)
+	}
+	if !strings.HasPrefix(lines[3], "├") || !strings.Contains(lines[3], "┴") || !strings.HasSuffix(lines[3], "╮") {
+		t.Fatalf("tab/content junction border is malformed: %q", lines[3])
+	}
+	if !strings.Contains(lines[4], "Filter:") || !strings.HasPrefix(lines[5], "├") || strings.Contains(lines[5], "┬") || !strings.HasSuffix(lines[5], "┤") {
+		t.Fatalf("filter section is malformed: %q", lines[4:6])
+	}
+	if !strings.HasPrefix(lines[len(lines)-3], "╰") || !strings.HasSuffix(lines[len(lines)-3], "╯") {
+		t.Fatalf("rounded content bottom border is malformed: %q", lines[len(lines)-3])
+	}
+	if !strings.Contains(lines[len(lines)-2], "Ready") {
+		t.Fatalf("status bar missing from penultimate row: %q", lines[len(lines)-2])
+	}
+	if !strings.Contains(lines[len(lines)-1], "focused") {
+		t.Fatalf("help bar missing from final row: %q", lines[len(lines)-1])
+	}
+}
+
+func TestFilterRowsCanBeClickedAcrossAllTabTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		model  Model
+		active int
+		check  func(Model) bool
+	}{
+		{name: "Commit", model: newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{}), active: workspaceCommitTab, check: func(m Model) bool { return m.fileFilter.Focused() && m.focus == focusFileFilter }},
+		{name: "Files", model: newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{}), active: workspaceFilesTab, check: func(m Model) bool { return m.fileFilter.Focused() && m.focus == focusFileFilter }},
+		{name: "Graph", model: newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{}), active: 2, check: func(m Model) bool { return m.graphFilter.Focused() && m.focus == focusGraphFilters }},
+		{name: "Remote list", model: New(fakeProvider{}, 0), active: 0, check: func(m Model) bool { return m.graphQuery.Focused() && m.focus == focusListSearch }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			m := test.model
+			m.active, m.width, m.height = test.active, 100, 24
+			m.screen = listScreen
+			updated, _ := m.Update(tea.MouseMsg{X: 10, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+			m = updated.(Model)
+			if !test.check(m) || !m.filterFocused() {
+				t.Fatalf("Filter click did not focus %s", test.name)
+			}
+		})
+	}
+}
+
+func TestFocusedFilterUsesAccentBorder(t *testing.T) {
+	if filterBorderStyle(true).GetForeground() != accent || filterBorderStyle(false).GetForeground() != border {
+		t.Fatal("Filter border does not switch between accent and normal colors")
+	}
+}
+
+func TestMouseFocusMovesCursorOutOfFilter(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 24
+	updated, _ := m.Update(tea.MouseMsg{X: 10, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if !m.fileFilter.Focused() {
+		t.Fatal("Filter did not receive initial mouse focus")
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 5, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.fileFilter.Focused() || !m.commitMessage.Focused() || m.focus != focusCommitMessage {
+		t.Fatalf("Commit message mouse focus left duplicate cursors: filter=%t commit=%t focus=%v", m.fileFilter.Focused(), m.commitMessage.Focused(), m.focus)
+	}
+
+	m.active = workspaceFilesTab
+	m.workspaceEntries = []worktree.Entry{{Path: "main.go", Name: "main.go"}}
+	updated, _ = m.Update(tea.MouseMsg{X: 10, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.MouseMsg{X: 3, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.fileFilter.Focused() || m.commitMessage.Focused() || m.focus != focusWorkspaceList {
+		t.Fatalf("file mouse selection left an input cursor: filter=%t commit=%t focus=%v", m.fileFilter.Focused(), m.commitMessage.Focused(), m.focus)
+	}
+}
+
+func TestTabFocusHighlightsRoundedBorder(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.focus = focusTabs
+	focusedColor := m.tabBorderStyle().GetBorderTopForeground()
+
+	m.focus = focusFileFilter
+	unfocusedColor := m.tabBorderStyle().GetBorderTopForeground()
+	if focusedColor == unfocusedColor {
+		t.Fatal("tab border style did not change when focus left the tabs")
+	}
+	if focusedColor != accent || unfocusedColor != border {
+		t.Fatalf("tab border colors: focused=%v unfocused=%v", focusedColor, unfocusedColor)
 	}
 }
 
@@ -1191,9 +1307,16 @@ func TestWorkspaceFilesCompressesRootPathEndingInFile(t *testing.T) {
 	if len(entries) != 1 || entries[0].Path != "src/app/main.go" || entries[0].Name != "src/app/main.go" || entries[0].IsDir {
 		t.Fatalf("compressed file path = %#v", entries)
 	}
+	displays := m.visibleWorkspaceEntryDisplays()
+	if len(displays) != 1 || displays[0].depth != 0 {
+		t.Fatalf("compressed root file display = %#v, want depth 0", displays)
+	}
+	if row := ansi.Strip(m.workspaceList(40, 1)); !strings.HasPrefix(row, "  "+workspaceFileIcon("main.go")+" src/app/main.go") {
+		t.Fatalf("compressed root file row is unexpectedly indented: %q", row)
+	}
 }
 
-func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
+func TestWorkspaceCommitMouseSkipsPanelTitles(t *testing.T) {
 	workspace := &fakeWorkspace{diffs: map[string]worktree.Diff{
 		"a.go": {Path: "a.go"}, "b.go": {Path: "b.go"},
 	}}
@@ -1205,14 +1328,15 @@ func TestWorkspaceCommitMouseSkipsGroupHeaders(t *testing.T) {
 	}
 	m.workspaceLoading = false
 
-	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	_, buttonY, _ := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: buttonY + 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	if cmd != nil || m.workspaceCursor != 0 { // row 2 is the Changes group header
-		t.Fatalf("group header selected cursor %d with cmd=%v", m.workspaceCursor, cmd != nil)
+	if cmd != nil || m.workspaceCursor != 0 {
+		t.Fatalf("panel title selected cursor %d with cmd=%v", m.workspaceCursor, cmd != nil)
 	}
-	updated, cmd = m.Update(tea.MouseMsg{X: 2, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd = m.Update(tea.MouseMsg{X: 2, Y: buttonY + 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	if cmd == nil || m.workspaceCursor != 1 {
+	if cmd == nil || m.workspaceCursor != 0 {
 		t.Fatalf("change click selected cursor %d with cmd=%v", m.workspaceCursor, cmd != nil)
 	}
 }
@@ -1242,8 +1366,8 @@ func TestWorkspaceCommitPreviewErrorKeepsFileListInteractive(t *testing.T) {
 		t.Fatalf("preview error replaced the file list:\n%s", view)
 	}
 
-	// Row 5 is the group header, row 6 is large.bin, and row 7 is small.go.
-	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	_, _, changesTop := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: changesTop + 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if cmd == nil || m.workspaceCursor != 1 || m.workspacePreviewErr != nil {
 		t.Fatalf("file click after preview error: cmd=%v cursor=%d previewErr=%v", cmd != nil, m.workspaceCursor, m.workspacePreviewErr)
@@ -1263,9 +1387,18 @@ func TestWorkspaceCommitFolderClickCollapsesAndExpandsChildren(t *testing.T) {
 		t.Fatalf("expanded changes = %d, want 4", got)
 	}
 
-	// The group header is row 5 and the first sorted item (README.md) is row 6,
-	// so the cmd directory is the next clickable row.
-	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	dashboardChanges := m.dashboardPanelChanges(false)
+	directoryIndex := -1
+	for index, change := range dashboardChanges {
+		if change.isDir && change.path == "cmd/app" {
+			directoryIndex = index
+		}
+	}
+	if directoryIndex < 0 {
+		t.Fatalf("dashboard tree missing cmd/app: %#v", dashboardChanges)
+	}
+	_, _, changesTop := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: 4, Y: changesTop + 1 + directoryIndex, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if cmd != nil || !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")] {
 		t.Fatalf("collapse click: cmd=%v collapsed=%t", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")])
@@ -1278,14 +1411,14 @@ func TestWorkspaceCommitFolderClickCollapsesAndExpandsChildren(t *testing.T) {
 		t.Fatalf("collapsed folder icon missing: %q", rendered)
 	}
 
-	updated, cmd = m.Update(tea.MouseMsg{X: 4, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd = m.Update(tea.MouseMsg{X: 4, Y: changesTop + 1 + directoryIndex, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if cmd != nil || m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")] || len(m.filteredWorkspaceChanges()) != 4 {
 		t.Fatalf("expand click: cmd=%v collapsed=%t changes=%d", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd")], len(m.filteredWorkspaceChanges()))
 	}
 }
 
-func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
+func TestWorkspaceCommitMessageSubmitsWithCtrlS(t *testing.T) {
 	workspace := &fakeWorkspace{}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
 	m.active, m.width, m.height = workspaceCommitTab, 120, 20
@@ -1293,10 +1426,10 @@ func TestWorkspaceCommitMessageSubmitsWithEnter(t *testing.T) {
 	m.commitMessage.SetValue("Describe the change")
 	m.commitMessage.Focus()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(Model)
 	if cmd == nil || !m.actionBusy {
-		t.Fatalf("Enter did not start commit: command=%v busy=%t", cmd != nil, m.actionBusy)
+		t.Fatalf("Ctrl+S did not start commit: command=%v busy=%t", cmd != nil, m.actionBusy)
 	}
 	updated, refresh := m.Update(cmd())
 	m = updated.(Model)
@@ -1318,15 +1451,378 @@ func TestWorkspaceCommitViewShowsMessageAndButton(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitDashboardPanelsAndRemoteButtons(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 24
+	if left, _ := m.commitDashboardWidths(); left != 48 {
+		t.Fatalf("initial Commit panel width = %d, want fixed width 48", left)
+	}
+	plain := ansi.Strip(m.View())
+	for _, want := range []string{"Commit ( 0↓ 0↑ )", "Staged", "Changes", "File Diff", "Commit message", "Commit"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("commit dashboard missing %q:\n%s", want, plain)
+		}
+	}
+	for _, want := range []string{"No Staging Files", "No Changes Files"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("empty Commit dashboard missing %q:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, "Pull") || strings.Contains(plain, "Push") {
+		t.Fatalf("remote buttons rendered without a remote:\n%s", plain)
+	}
+	lines := strings.Split(plain, "\n")
+	if !strings.HasPrefix(lines[3], "├") || !strings.HasSuffix(lines[3], "╮") {
+		t.Fatalf("Commit dashboard is not connected to the root border: %q", lines[3])
+	}
+	if !strings.Contains(lines[4], "Filter:") || !strings.HasPrefix(lines[5], "├") || strings.Contains(lines[5], "┬") {
+		t.Fatalf("Commit Filter section is malformed: %q", lines[4:6])
+	}
+	if !strings.HasPrefix(lines[6], "│╭") || !strings.HasSuffix(lines[6], "│") {
+		t.Fatalf("Commit panels are not inside the root border: %q", lines[6])
+	}
+	if !strings.HasPrefix(lines[len(lines)-3], "╰") || !strings.HasSuffix(lines[len(lines)-3], "╯") {
+		t.Fatalf("Commit dashboard root bottom is malformed: %q", lines[len(lines)-3])
+	}
+
+	m.workspaceRemote = worktree.RemoteState{Available: true, Ahead: 2, Behind: 3}
+	plain = ansi.Strip(m.View())
+	for _, want := range []string{"Commit ( 3↓ 2↑ )", "Pull", "Push", "Commit"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("remote commit dashboard missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestWorkspaceCommitMessageAndPanelSplitsResize(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	m.workspaceStatus = worktree.Status{
+		Staged:   []worktree.Change{{Path: "staged.go", Code: 'M'}},
+		Unstaged: []worktree.Change{{Path: "changed.go", Code: 'M'}},
+	}
+	left, _, initialChangesTop := m.commitDashboardGeometry()
+	m.commitMessage.SetValue(strings.Repeat("long commit message ", 8))
+	_, _, wrappedChangesTop := m.commitDashboardGeometry()
+	if wrappedChangesTop <= initialChangesTop {
+		t.Fatalf("long message did not grow Commit panel: initial=%d wrapped=%d", initialChangesTop, wrappedChangesTop)
+	}
+
+	updated, _ := m.Update(tea.MouseMsg{X: 2, Y: wrappedChangesTop, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if !m.workspaceCommitDividerDragging {
+		t.Fatal("Staged/Changes divider did not start dragging")
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: wrappedChangesTop + 2, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if m.workspaceCommitSplitRatio == 0.5 {
+		t.Fatal("Staged/Changes divider did not update its ratio")
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{X: left, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if !m.workspaceDividerDragging {
+		t.Fatal("File Diff divider did not start dragging")
+	}
+}
+
+func TestWorkspaceCommitMessageWrapsByTerminalCellWidth(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 80, 30
+	m.workspaceCommitWidth = 24
+	m.commitMessage.SetValue(strings.Repeat("한글", 12))
+	segments := m.commitMessageSegments(10)
+	if len(segments) < 3 {
+		t.Fatalf("wide Commit message did not wrap: %#v", segments)
+	}
+	runes := []rune(m.commitMessage.Value())
+	for _, segment := range segments {
+		if width := ansi.StringWidth(string(runes[segment.start:segment.end])); width > 10 {
+			t.Fatalf("wrapped Commit row width = %d, want <= 10", width)
+		}
+	}
+	shortRows := m.commitMessageRowCount(48)
+	longRows := m.commitMessageRowCount(24)
+	if longRows <= shortRows {
+		t.Fatalf("Commit panel did not grow at narrow width: wide=%d narrow=%d", shortRows, longRows)
+	}
+}
+
+func TestWorkspaceCommitMessageEnterInsertsNewline(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 80, 30
+	m.focus = focusCommitMessage
+	m.commitMessage.SetValue("subjectbody")
+	m.commitMessage.SetCursor(len([]rune("subject")))
+	m.commitMessage.Focus()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil || m.commitMessageText() != "subject\nbody" || m.commitMessage.Position() != len([]rune("subject\n")) {
+		t.Fatalf("Enter newline state: value=%q position=%d cmd=%v", m.commitMessageText(), m.commitMessage.Position(), cmd != nil)
+	}
+	segments := m.commitMessageSegments(40)
+	if len(segments) != 2 {
+		t.Fatalf("explicit newline segments = %#v, want 2 rows", segments)
+	}
+}
+
+func TestWorkspaceCommitEmptyChangePanelsAreFixedHeight(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	panelHeight := m.height - 9
+	commitHeight := m.commitMessageRowCount(48) + 3
+	stagedHeight, changesHeight := m.commitChangePanelHeights(panelHeight - commitHeight)
+	if stagedHeight != 3 || changesHeight != 3 {
+		t.Fatalf("empty panel heights = staged %d, changes %d; want 3 and 3", stagedHeight, changesHeight)
+	}
+	_, _, changesTop := m.commitDashboardGeometry()
+	updated, _ := m.Update(tea.MouseMsg{X: 2, Y: changesTop, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.workspaceCommitDividerDragging {
+		t.Fatal("empty Staged/Changes panels started height resizing")
+	}
+}
+
+func TestWorkspaceCommitFileArrowButtonsStageAndUnstage(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	m.workspaceStatus = worktree.Status{
+		Staged:   []worktree.Change{{Path: "ready.go", Code: 'M'}},
+		Unstaged: []worktree.Change{{Path: "change.go", Code: 'M'}},
+	}
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "ready.go") || !strings.Contains(plain, "↓") || !strings.Contains(plain, "change.go") || !strings.Contains(plain, "↑") {
+		t.Fatalf("stage arrow buttons missing:\n%s", plain)
+	}
+	if stageArrowStyle.GetBackground() == unstageArrowStyle.GetBackground() ||
+		stageArrowStyle.GetForeground() == stageArrowStyle.GetBackground() ||
+		unstageArrowStyle.GetForeground() == unstageArrowStyle.GetBackground() {
+		t.Fatal("stage arrow buttons do not have distinct high-contrast colors")
+	}
+
+	left, buttonY, changesTop := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: left - 1, Y: buttonY + 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("Unstage arrow did not start an action")
+	}
+	cmd()
+	if !reflect.DeepEqual(workspace.unstaged, []string{"ready.go"}) {
+		t.Fatalf("unstaged paths = %#v", workspace.unstaged)
+	}
+
+	m.actionBusy = false
+	updated, cmd = m.Update(tea.MouseMsg{X: left - 1, Y: changesTop + 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if cmd == nil {
+		t.Fatal("Stage arrow did not start an action")
+	}
+	cmd()
+	if !reflect.DeepEqual(workspace.staged, []string{"change.go"}) {
+		t.Fatalf("staged paths = %#v", workspace.staged)
+	}
+}
+
+func TestWorkspaceCommitChangesRenderAsCollapsibleTree(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	m.workspaceStatus.Unstaged = []worktree.Change{
+		{Path: "cmd/app/main.go", Code: 'M'},
+		{Path: "cmd/app/run.go", Code: 'M'},
+		{Path: "README.md", Code: 'M'},
+	}
+	tree := m.dashboardPanelChanges(false)
+	directoryIndex := -1
+	for index, item := range tree {
+		if item.isDir && item.path == "cmd/app" {
+			directoryIndex = index
+		}
+	}
+	if directoryIndex < 0 {
+		t.Fatalf("Changes tree has no compressed cmd/app directory: %#v", tree)
+	}
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "cmd/app") || !strings.Contains(plain, "main.go") || !strings.Contains(plain, "run.go") {
+		t.Fatalf("Changes tree is not rendered:\n%s", plain)
+	}
+
+	_, _, changesTop := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: 3, Y: changesTop + 1 + directoryIndex, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd != nil || !m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")] {
+		t.Fatalf("Changes folder click did not collapse: cmd=%v collapsed=%t", cmd != nil, m.workspaceChangeCollapsed[workspaceChangeExpansionKey(false, "cmd/app")])
+	}
+}
+
+func TestWorkspaceCommitCursorSelectsEachTreeRow(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	m.workspaceStatus = worktree.Status{
+		Staged:   []worktree.Change{{Path: "ready.go", Code: 'M'}},
+		Unstaged: []worktree.Change{{Path: "change.go", Code: 'M'}, {Path: "next.go", Code: 'M'}},
+	}
+	m.focus = focusWorkspaceList
+	m.workspaceCursor = 0
+	all := m.filteredWorkspaceChanges()
+	if len(all) != 3 || !m.dashboardChangeSelected(all[0]) {
+		t.Fatalf("initial tree selection = cursor %d changes %#v", m.workspaceCursor, all)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	all = m.filteredWorkspaceChanges()
+	if m.workspaceCursor != 1 || !m.dashboardChangeSelected(all[1]) || m.dashboardChangeSelected(all[0]) {
+		t.Fatalf("second tree selection = cursor %d", m.workspaceCursor)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	all = m.filteredWorkspaceChanges()
+	if m.workspaceCursor != 2 || !m.dashboardChangeSelected(all[2]) {
+		t.Fatalf("third tree selection = cursor %d", m.workspaceCursor)
+	}
+}
+
+func TestWorkspaceCommitEnteringChangesClampsStaleCursor(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 24
+	m.workspaceStatus.Unstaged = []worktree.Change{{Path: "only.go", Code: 'M'}}
+	m.workspaceCursor = 99
+	m.focus = focusCommitMessage
+	m.commitMessage.Focus()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	changes := m.filteredWorkspaceChanges()
+	if m.focus != focusWorkspaceList || m.workspaceCursor != 0 || len(changes) != 1 || !m.dashboardChangeSelected(changes[0]) {
+		t.Fatalf("Changes entry did not clamp selection: focus=%v cursor=%d changes=%d", m.focus, m.workspaceCursor, len(changes))
+	}
+}
+
+func TestWorkspaceCommitDiffUsesDashboardWidthOnLoadAndResize(t *testing.T) {
+	workspace := &fakeWorkspace{diffs: map[string]worktree.Diff{"main.go": {Path: "main.go", Patch: "@@ -1 +1 @@\n-old\n+new"}}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 100, 24
+	m.workspaceStatus.Unstaged = []worktree.Change{{Path: "main.go", Code: 'M'}}
+	m.workspaceCursor = 0
+
+	loaded, load := m.loadSelectedWorkspaceItem()
+	m = loaded
+	if load == nil {
+		t.Fatal("initial File Diff load command is nil")
+	}
+	result := load().(workspaceResultMsg)
+	if result.width != m.workspaceDiffRenderWidth() {
+		t.Fatalf("initial diff width = %d, want dashboard width %d", result.width, m.workspaceDiffRenderWidth())
+	}
+	updated, _ := m.Update(result)
+	m = updated.(Model)
+	oldWidth := m.workspaceDiffWidth
+
+	updated, rerender := m.Update(tea.WindowSizeMsg{Width: 130, Height: 24})
+	m = updated.(Model)
+	if rerender == nil {
+		t.Fatal("terminal resize did not rerender File Diff")
+	}
+	resized := rerender().(workspaceResultMsg)
+	if resized.width != m.workspaceDiffRenderWidth() || resized.width == oldWidth {
+		t.Fatalf("resized diff width = %d, dashboard=%d old=%d", resized.width, m.workspaceDiffRenderWidth(), oldWidth)
+	}
+}
+
+func TestWorkspaceCommitRemoteButtonsRunActions(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 90, 24
+	m.workspaceRemote = worktree.RemoteState{Available: true, Ahead: 1, Behind: 1}
+	left, buttonY, _ := m.commitDashboardGeometry()
+	buttonWidth := (left - 4) / 3
+
+	updated, cmd := m.Update(tea.MouseMsg{X: 1 + buttonWidth/2, Y: buttonY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("Pull button did not start an action")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	if workspace.pulls != 1 {
+		t.Fatalf("pull calls = %d, want 1", workspace.pulls)
+	}
+
+	m.actionBusy = false
+	updated, cmd = m.Update(tea.MouseMsg{X: 1 + buttonWidth + 1 + buttonWidth/2, Y: buttonY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if cmd == nil {
+		t.Fatal("Push button did not start an action")
+	}
+	cmd()
+	if workspace.pushes != 1 {
+		t.Fatalf("push calls = %d, want 1", workspace.pushes)
+	}
+}
+
+func TestWorkspaceCommitPanelFocusUsesAccentBorder(t *testing.T) {
+	if dashboardPanelBorderStyle(true).GetForeground() != accent {
+		t.Fatal("focused panel border does not use the accent color")
+	}
+	if dashboardPanelBorderStyle(false).GetForeground() != border {
+		t.Fatal("unfocused panel border does not use the normal border color")
+	}
+	colors := []lipgloss.TerminalColor{pullButtonStyle.GetBackground(), pushButtonStyle.GetBackground(), dashboardCommitButtonStyle.GetBackground()}
+	if colors[0] == colors[1] || colors[1] == colors[2] || colors[0] == colors[2] {
+		t.Fatalf("Pull, Push, and Commit button colors are not distinct: %v", colors)
+	}
+}
+
+func TestWorkspaceCommitCursorAndButtonAvailability(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceCommitTab, 100, 24
+	m.focus = focusCommitMessage
+	m.commitMessage.Focus()
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "Commit message") {
+		t.Fatal("focused Commit message does not render a visible cursor")
+	}
+	if m.commitCanPull() || m.commitCanPush() || m.commitCanCommit() {
+		t.Fatal("empty Commit dashboard actions are unexpectedly enabled")
+	}
+	m.workspaceRemote = worktree.RemoteState{Available: true, Ahead: 2, Behind: 3}
+	if !m.commitCanPull() || !m.commitCanPush() {
+		t.Fatal("remote actions did not enable from ahead/behind counts")
+	}
+	m.commitMessage.SetValue("Ready")
+	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
+	if !m.commitCanCommit() {
+		t.Fatal("Commit did not enable with a message and staged file")
+	}
+	if disabledButtonStyle.GetBackground() == dashboardCommitButtonStyle.GetBackground() {
+		t.Fatal("disabled button does not have a distinct background")
+	}
+}
+
+func TestWorkspaceCommitRemoteStateRefreshUpdatesCounts(t *testing.T) {
+	workspace := &fakeWorkspace{remote: worktree.RemoteState{Available: true, Ahead: 4, Behind: 5}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceCommitTab
+	result := m.fetchWorkspaceRemoteStateCmd()().(workspaceRemoteResultMsg)
+	updated, _ := m.Update(result)
+	m = updated.(Model)
+	if m.workspaceRemote.Ahead != 4 || m.workspaceRemote.Behind != 5 {
+		t.Fatalf("remote counts = %#v", m.workspaceRemote)
+	}
+	updated, tick := m.Update(commitRemoteTickMsg(time.Now()))
+	if tick == nil || updated.(Model).workspaceRemote != m.workspaceRemote {
+		t.Fatal("5-second Commit remote polling was not scheduled")
+	}
+}
+
 func TestWorkspaceCommitButtonSubmitsMessage(t *testing.T) {
 	workspace := &fakeWorkspace{}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
 	m.active, m.width, m.height = workspaceCommitTab, 120, 20
 	m.workspaceStatus.Staged = []worktree.Change{{Path: "main.go", Code: 'M'}}
 	m.commitMessage.SetValue("Commit from button")
-	buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
-
-	updated, cmd := m.Update(tea.MouseMsg{X: m.width - buttonWidth - 1, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	left, buttonY, _ := m.commitDashboardGeometry()
+	updated, cmd := m.Update(tea.MouseMsg{X: left / 2, Y: buttonY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if cmd == nil || !m.actionBusy {
 		t.Fatalf("Commit button did not start commit: command=%v busy=%t", cmd != nil, m.actionBusy)
@@ -1342,13 +1838,13 @@ func TestWorkspaceCommitRequiresMessageAndStagedChanges(t *testing.T) {
 	m.active = workspaceCommitTab
 	m.commitMessage.Focus()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(Model)
 	if m.actionBusy || len(m.workspace.(*fakeWorkspace).commits) != 0 || m.status != "enter a commit message" {
 		t.Fatalf("empty message: busy=%t status=%q", m.actionBusy, m.status)
 	}
 	m.commitMessage.SetValue("Nothing staged")
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
 	m = updated.(Model)
 	if m.actionBusy || len(m.workspace.(*fakeWorkspace).commits) != 0 || m.status != "stage changes before committing" {
 		t.Fatalf("unstaged commit: busy=%t status=%q", m.actionBusy, m.status)
@@ -1439,7 +1935,7 @@ func TestWorkspaceDiffFallsBackForLargeOneSidedChange(t *testing.T) {
 func TestWorkspacePreviewCanScrollWithoutChangingSelection(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	m.active = workspaceFilesTab
-	m.width, m.height = 120, 12
+	m.width, m.height = 120, 16
 	m.workspaceEntries = []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}
 	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte("one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n")}
 
@@ -1477,7 +1973,7 @@ func TestWrappedMarkdownPreviewCanScroll(t *testing.T) {
 func TestWorkspacePreviewScrollsWithRightPaneMouseWheel(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	m.active = workspaceFilesTab
-	m.width, m.height = 100, 12
+	m.width, m.height = 100, 16
 	m.workspaceEntries = []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}
 	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("line\n", 20))}
 	leftWidth, _ := m.workspacePaneWidths()
@@ -1518,7 +2014,7 @@ func TestWorkspaceFileRefreshPreservesAndClampsPreviewOffset(t *testing.T) {
 	workspace := &fakeWorkspace{entries: []worktree.Entry{{Path: "long.txt", Name: "long.txt"}}}
 	m := newWithWorkspace(fakeProvider{}, 0, workspace)
 	m.active = workspaceFilesTab
-	m.width, m.height = 100, 12
+	m.width, m.height = 100, 16
 	m.workspaceEntries = workspace.entries
 	m.workspaceFile = worktree.File{Path: "long.txt", Data: []byte(strings.Repeat("old\n", 30))}
 	m.workspacePreviewOffset = 8
@@ -1588,7 +2084,7 @@ func TestWorkspaceDividerDragUpdatesAndStopsOnRelease(t *testing.T) {
 	m.active, m.width, m.height = workspaceFilesTab, 120, 20
 	left, _ := m.workspacePaneWidths()
 
-	updated, cmd := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd := m.Update(tea.MouseMsg{X: left + 1, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if cmd != nil || !m.workspaceDividerDragging {
 		t.Fatalf("divider press: dragging=%t cmd=%v", m.workspaceDividerDragging, cmd != nil)
@@ -1615,7 +2111,7 @@ func TestWorkspaceDividerDragClampsAndResizePreservesRatio(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	m.active, m.width, m.height = workspaceFilesTab, 120, 20
 	left, _ := m.workspacePaneWidths()
-	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	updated, _ = m.Update(tea.MouseMsg{X: -20, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
 	m = updated.(Model)
@@ -1650,10 +2146,22 @@ func TestWorkspaceDividerDoesNotStealListClicks(t *testing.T) {
 	m.workspaceEntries = []worktree.Entry{{Path: "one.txt", Name: "one.txt"}, {Path: "two.txt", Name: "two.txt"}}
 	m.workspaceLoading = false
 
-	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, cmd := m.Update(tea.MouseMsg{X: 2, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	if m.workspaceDividerDragging || m.workspaceCursor != 1 || cmd == nil {
 		t.Fatalf("list click conflict: dragging=%t cursor=%d cmd=%v", m.workspaceDividerDragging, m.workspaceCursor, cmd != nil)
+	}
+}
+
+func TestWorkspaceFilesStartsWithFixedFileListWidth(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width = workspaceFilesTab, 120
+	left, right := m.workspacePaneWidths()
+	if left != 42 {
+		t.Fatalf("initial File List width = %d, want fixed width 42", left)
+	}
+	if right <= left {
+		t.Fatalf("initial Preview width = %d, want wider than File List width %d", right, left)
 	}
 }
 
@@ -1666,7 +2174,7 @@ func TestWorkspaceDividerInvalidatesStaleImageRender(t *testing.T) {
 	m.workspacePreviewRequest = 4
 	left, _ := m.workspacePaneWidths()
 
-	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ := m.Update(tea.MouseMsg{X: left + 1, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
 	updated, cmd := m.Update(tea.MouseMsg{X: 65, Y: 6, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
 	m = updated.(Model)
@@ -1680,7 +2188,7 @@ func TestWorkspaceDividerInvalidatesStaleImageRender(t *testing.T) {
 	}
 }
 
-func TestWorkspaceDividerRendersAtFullBodyHeight(t *testing.T) {
+func TestWorkspaceDividerDoesNotRenderAGutter(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	height := 7
 	rendered := m.workspaceDividerView(height)
@@ -1689,13 +2197,21 @@ func TestWorkspaceDividerRendersAtFullBodyHeight(t *testing.T) {
 		t.Fatalf("divider rows = %d, want %d", len(rows), height)
 	}
 	for index, row := range rows {
-		if !strings.Contains(row, "┃") || lipgloss.Width(row) != 3 {
+		if row != "" || lipgloss.Width(row) != 0 {
 			t.Fatalf("divider row %d = %q, width %d", index, row, lipgloss.Width(row))
 		}
 	}
 	m.workspaceDividerDragging = true
-	if active := m.workspaceDividerView(1); !strings.Contains(active, " ┃ ") || strings.Contains(active, "━") {
+	if active := m.workspaceDividerView(1); active != "" {
 		t.Fatalf("active divider = %q", active)
+	}
+}
+
+func TestKittyImageDeletePreservesTerminalCursor(t *testing.T) {
+	t.Setenv("KITTY_WINDOW_ID", "1")
+	command := kittyDeleteImage()
+	if !strings.HasPrefix(command, "\x1b7") || !strings.HasSuffix(command, "\x1b8") {
+		t.Fatalf("Kitty image delete does not preserve the cursor: %q", command)
 	}
 }
 
@@ -1708,7 +2224,7 @@ func TestWorkspacePreviewStripsTerminalControlSequences(t *testing.T) {
 	if strings.Contains(rendered, "\x1b[2J") || strings.Contains(rendered, "\x1b[31m.txt") {
 		t.Fatalf("preview leaked terminal control sequence: %q", rendered)
 	}
-	if !strings.Contains(rendered, "safe[2J") || !strings.Contains(rendered, "next\tcolumn") {
+	if !strings.Contains(rendered, "safe[2J") || !strings.Contains(rendered, "next    column") {
 		t.Fatalf("preview lost safe content: %q", rendered)
 	}
 	if strings.Contains(rendered, "\nname.txt") {

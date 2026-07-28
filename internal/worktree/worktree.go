@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,6 +126,14 @@ type Branch struct {
 	UpdatedAt time.Time
 	Head      bool
 	Remote    bool
+}
+
+// RemoteState describes whether the repository has a configured remote and
+// how the current branch compares with its upstream.
+type RemoteState struct {
+	Available bool
+	Ahead     int
+	Behind    int
 }
 
 // New creates a client rooted at root. The root may be relative.
@@ -440,6 +449,40 @@ func (c *Client) DeleteRemoteBranch(ctx context.Context, remote, name string) er
 		return err
 	}
 	_, err := c.git(ctx, "push", remote, "--delete", name)
+	return err
+}
+
+func (c *Client) RemoteState(ctx context.Context) (RemoteState, error) {
+	out, err := c.git(ctx, "remote")
+	if err != nil {
+		return RemoteState{}, err
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		return RemoteState{}, nil
+	}
+	state := RemoteState{Available: true}
+	if _, err := c.git(ctx, "rev-parse", "--abbrev-ref", "@{upstream}"); err != nil {
+		return state, nil
+	}
+	out, err = c.git(ctx, "rev-list", "--left-right", "--count", "HEAD...@{upstream}")
+	if err != nil {
+		return state, nil
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 2 {
+		state.Ahead, _ = strconv.Atoi(fields[0])
+		state.Behind, _ = strconv.Atoi(fields[1])
+	}
+	return state, nil
+}
+
+func (c *Client) Pull(ctx context.Context) error {
+	_, err := c.git(ctx, "pull", "--ff-only")
+	return err
+}
+
+func (c *Client) Push(ctx context.Context) error {
+	_, err := c.git(ctx, "push")
 	return err
 }
 

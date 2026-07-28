@@ -34,6 +34,7 @@ const (
 	focusWorkspaceList
 	focusWorkspacePreview
 	focusListSearch
+	focusListFilters
 	focusListItems
 )
 
@@ -106,6 +107,13 @@ type actionResultMsg struct {
 
 type tickMsg time.Time
 
+type commitRemoteTickMsg time.Time
+
+type workspaceRemoteResultMsg struct {
+	remote worktree.RemoteState
+	err    error
+}
+
 type workspaceWatchMsg struct {
 	path   string
 	err    error
@@ -169,35 +177,39 @@ type Model struct {
 	graphDepth       graphNavigationDepth
 	graphFile        int
 
-	workspaceEntries         []worktree.Entry
-	workspaceFile            worktree.File
-	workspaceImage           string
-	workspaceImageWidth      int
-	workspaceImageHeight     int
-	workspaceStatus          worktree.Status
-	workspaceDiff            worktree.Diff
-	workspaceDiffRows        []string
-	workspaceDiffWidth       int
-	workspaceCursor          int
-	workspaceOffset          int
-	workspacePreviewOffset   int
-	workspacePendingPath     string
-	workspaceRequest         uint64
-	workspaceEntryRequest    uint64
-	workspaceEntryPending    int
-	workspacePreviewRequest  uint64
-	workspaceLoading         bool
-	workspacePreviewLoading  bool
-	workspacePreviewErr      error
-	workspaceExpanded        map[string]bool
-	workspaceLoaded          map[string]bool
-	workspaceChangeCollapsed map[string]bool
-	workspaceSplitRatio      float64
-	workspaceDividerDragging bool
-	workspaceWatchGeneration uint64
-	workspaceWatchPending    bool
-	workspaceWatcherErr      error
-	workspaceDebounce        time.Duration
+	workspaceEntries               []worktree.Entry
+	workspaceFile                  worktree.File
+	workspaceImage                 string
+	workspaceImageWidth            int
+	workspaceImageHeight           int
+	workspaceStatus                worktree.Status
+	workspaceRemote                worktree.RemoteState
+	workspaceDiff                  worktree.Diff
+	workspaceDiffRows              []string
+	workspaceDiffWidth             int
+	workspaceCursor                int
+	workspaceOffset                int
+	workspacePreviewOffset         int
+	workspacePendingPath           string
+	workspaceRequest               uint64
+	workspaceEntryRequest          uint64
+	workspaceEntryPending          int
+	workspacePreviewRequest        uint64
+	workspaceLoading               bool
+	workspacePreviewLoading        bool
+	workspacePreviewErr            error
+	workspaceExpanded              map[string]bool
+	workspaceLoaded                map[string]bool
+	workspaceChangeCollapsed       map[string]bool
+	workspaceSplitRatio            float64
+	workspaceDividerDragging       bool
+	workspaceCommitWidth           int
+	workspaceCommitSplitRatio      float64
+	workspaceCommitDividerDragging bool
+	workspaceWatchGeneration       uint64
+	workspaceWatchPending          bool
+	workspaceWatcherErr            error
+	workspaceDebounce              time.Duration
 
 	commentMode      commentMode
 	commentItem      provider.Item
@@ -361,6 +373,12 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceLoaded = make(map[string]bool)
 	model.workspaceChangeCollapsed = make(map[string]bool)
 	model.workspaceDebounce = 150 * time.Millisecond
+	// Start Files with a stable, readable File List width. A non-zero value is
+	// stored only after the user resizes the split, at which point the chosen
+	// ratio continues to be preserved across terminal resizes.
+	model.workspaceSplitRatio = 0
+	model.workspaceCommitWidth = 48
+	model.workspaceCommitSplitRatio = 0.5
 	model.focus = focusTabs
 	return model
 }
@@ -396,6 +414,9 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.refresh > 0 && m.remoteErr == nil {
 		commands = append(commands, tickCmd(m.refresh))
+	}
+	if m.workspace != nil {
+		commands = append(commands, commitRemoteTickCmd())
 	}
 	return tea.Batch(commands...)
 }
@@ -496,6 +517,10 @@ func (m Model) filters() []provider.Filter {
 
 func tickCmd(interval time.Duration) tea.Cmd {
 	return tea.Tick(interval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+func commitRemoteTickCmd() tea.Cmd {
+	return tea.Tick(5*time.Second, func(t time.Time) tea.Msg { return commitRemoteTickMsg(t) })
 }
 
 func waitWorkspaceWatchCmd(watcher workspaceWatcher) tea.Cmd {
@@ -682,6 +707,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.workspaceDividerDragging = false
+		m.workspaceCommitDividerDragging = false
 		m.resizeViewport()
 		if m.screen == diffScreen || m.commentUsesDiffBackground() {
 			m.setDiffContent()
@@ -697,7 +723,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.localTab() && !m.workspacePreviewLoading && m.workspaceCommitActive() && m.workspaceDiff.Path != "" {
-			_, width := m.workspacePaneWidths()
+			width := m.workspaceDiffRenderWidth()
 			if width != m.workspaceDiffWidth {
 				m.workspacePreviewRequest++
 				m.workspacePreviewLoading = true
@@ -858,6 +884,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(commands...)
 
+	case commitRemoteTickMsg:
+		commands := []tea.Cmd{commitRemoteTickCmd()}
+		if m.workspaceCommitActive() && !m.actionBusy {
+			commands = append(commands, m.fetchWorkspaceRemoteStateCmd())
+		}
+		return m, tea.Batch(commands...)
+
+	case workspaceRemoteResultMsg:
+		if msg.err == nil {
+			m.workspaceRemote = msg.remote
+		}
+		return m, nil
+
 	case tea.MouseMsg:
 		if m.modal != nil {
 			return m.updateModalMouse(msg)
@@ -900,16 +939,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		// Search is a global list-screen destination. It intentionally wins over
 		// local shortcuts so users never need to remember which region owns it.
 		if msg.String() == "/" {
-			if m.localTab() {
-				m.focus = focusFileFilter
-				return m, m.fileFilter.Focus()
-			}
-			if m.workspace != nil && m.kind() == provider.Commits {
-				m.focus = focusGraphFilters
-				return m, m.graphFilter.Focus()
-			}
-			m.focus = focusListSearch
-			return m, m.graphQuery.Focus()
+			focused, cmd := m.focusActiveFilter()
+			return focused, cmd
 		}
 		// Tab-bar arrows are global once the tab bar owns focus. Keeping this at
 		// the top level prevents individual tab handlers from drifting apart.
@@ -972,13 +1003,14 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		(m.focus == focusGraphCommits || m.focus == focusListItems) {
 		m.graphDepth, m.graphFile = graphCommitDepth, 0
 		m.focus = focusGraphFilters
-		return m, m.graphFilter.Focus()
+		m.graphFilter.Blur()
+		return m, nil
 	}
 	// Standard list tabs share the reverse boundary: the first result returns
-	// to Search. Graph and workspace lists have their own intermediate regions.
+	// to the filter options. Graph and workspace lists have their own regions.
 	if m.focus == focusListItems && m.kind() != provider.Commits && msg.String() == "up" && m.cursor[m.kind()] == 0 {
-		m.focus = focusListSearch
-		return m, m.graphQuery.Focus()
+		m.focus = focusListFilters
+		return m, nil
 	}
 	// Every non-workspace list tab shares tab-bar ownership. Graph adds an
 	// intermediate filter region below, while the other tabs enter Search.
@@ -1013,9 +1045,12 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case focusGraphFilters:
 			switch key {
 			case "up":
-				m.graphFilter.Blur()
-				m.focus = focusTabs
-				return m, nil
+				if m.graphFilter.Focused() {
+					m.graphFilter.Blur()
+					m.focus = focusTabs
+					return m, nil
+				}
+				return m, m.graphFilter.Focus()
 			case "left", "right":
 				if !m.graphFilter.Focused() {
 					delta := 1
@@ -1027,7 +1062,10 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					return m.startListLoad()
 				}
 			case "down", "enter":
-				m.graphFilter.Blur()
+				if m.graphFilter.Focused() {
+					m.graphFilter.Blur()
+					return m, nil
+				}
 				m.focus = focusGraphCommits
 				return m, nil
 			}
@@ -1048,8 +1086,31 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+	if m.focus == focusListFilters && m.kind() != provider.Commits {
+		switch msg.String() {
+		case "up":
+			m.focus = focusListSearch
+			return m, m.graphQuery.Focus()
+		case "down", "enter":
+			m.focus = focusListItems
+			return m, nil
+		case "left":
+			return m.changeFilter(-1)
+		case "right":
+			return m.changeFilter(1)
+		}
+	}
 	if m.graphQuery.Focused() {
-		if msg.String() == "esc" || msg.String() == "enter" || msg.String() == "down" {
+		if msg.String() == "enter" || msg.String() == "down" {
+			m.graphQuery.Blur()
+			if m.kind() == provider.Commits {
+				m.focus = focusListItems
+			} else {
+				m.focus = focusListFilters
+			}
+			return m, nil
+		}
+		if msg.String() == "esc" {
 			m.graphQuery.Blur()
 			m.focus = focusListItems
 			return m, nil
@@ -1786,8 +1847,9 @@ func (m *Model) clampSelection(kind provider.Kind) {
 }
 
 func (m Model) listHeight() int {
-	// Header, tabs, separator, Search, filters, spacer, status, and help.
-	height := m.height - 8
+	// Header, three-row tab/content top, Search, filters, spacer, content bottom,
+	// status, and help.
+	height := m.height - 13
 	if m.remoteErr != nil && m.workspace != nil && m.kind() == provider.Branches {
 		height-- // The local Branches list also keeps the remote-unavailable notice.
 	}
@@ -2277,31 +2339,143 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.workspaceDividerDragging = false
 		}
 	}
+	if m.workspaceCommitDividerDragging {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			m.workspaceCommitDividerDragging = false
+			return m, nil
+		case tea.MouseActionMotion:
+			leftWidth, _, _ := m.commitDashboardGeometry()
+			panelHeight := max(1, m.height-9)
+			commitHeight := m.commitMessageRowCount(leftWidth) + 3
+			remaining := max(2, panelHeight-commitHeight)
+			m.workspaceCommitSplitRatio = min(0.85, max(0.15, float64(msg.Y-6-commitHeight)/float64(remaining)))
+			return m, nil
+		}
+	}
 	if m.actionBusy {
 		return m, nil
 	}
 	if m.screen == commentScreen {
 		return m, nil
 	}
-	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 1 {
+	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 2 {
 		if tab := m.tabAt(msg.X); tab >= 0 {
 			m.active = tab
 			m.status = ""
 			return m.startActiveTabLoad()
 		}
 	}
+	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 && msg.X > 0 && msg.X < m.width-1 {
+		focused, cmd := m.focusActiveFilter()
+		return focused, cmd
+	}
+	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		m = m.blurInteractiveInputs()
+		if m.localTab() {
+			m.focus = focusWorkspaceList
+		} else if m.workspace != nil && m.kind() == provider.Commits {
+			m.focus = focusGraphCommits
+		} else {
+			m.focus = focusListItems
+		}
+	}
 	if m.localTab() {
+		if m.workspaceCommitActive() {
+			leftPanelWidth, buttonY, changesTop := m.commitDashboardGeometry()
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X >= leftPanelWidth && msg.X <= leftPanelWidth+1 && msg.Y >= 6 && msg.Y < m.height-3 {
+				m.workspaceDividerDragging = true
+				return m, nil
+			}
+			canResizeChangePanels := len(m.workspaceStatus.Staged) > 0 && len(m.workspaceStatus.Unstaged)+len(m.workspaceStatus.Untracked) > 0
+			if canResizeChangePanels && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X > 0 && msg.X <= leftPanelWidth && (msg.Y == changesTop-1 || msg.Y == changesTop) {
+				m.workspaceCommitDividerDragging = true
+				return m, nil
+			}
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X == leftPanelWidth-1 {
+				stagedRow := msg.Y - (buttonY + 3)
+				stagedChanges := m.dashboardPanelChanges(true)
+				stagedHeight := changesTop - (buttonY + 2)
+				stagedRow += m.dashboardPanelStart(true, stagedHeight)
+				if stagedRow >= 0 && stagedRow < len(stagedChanges) && !stagedChanges[stagedRow].isDir {
+					return m.startWorkspacePathStage(stagedChanges[stagedRow].displayPath(), true)
+				}
+				changes := m.dashboardPanelChanges(false)
+				changesRow := msg.Y - (changesTop + 1)
+				changesHeight := max(0, m.height-3-changesTop)
+				changesRow += m.dashboardPanelStart(false, changesHeight)
+				if changesRow >= 0 && changesRow < len(changes) && !changes[changesRow].isDir {
+					return m.startWorkspacePathStage(changes[changesRow].displayPath(), false)
+				}
+			}
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X > 1 && msg.X < leftPanelWidth {
+				stagedChanges := m.dashboardPanelChanges(true)
+				stagedRow := msg.Y - (buttonY + 3)
+				stagedHeight := changesTop - (buttonY + 2)
+				stagedRow += m.dashboardPanelStart(true, stagedHeight)
+				if stagedRow >= 0 && stagedRow < len(stagedChanges) {
+					return m.selectDashboardChange(stagedChanges[stagedRow])
+				}
+				changes := m.dashboardPanelChanges(false)
+				changesRow := msg.Y - (changesTop + 1)
+				changesHeight := max(0, m.height-3-changesTop)
+				changesRow += m.dashboardPanelStart(false, changesHeight)
+				if changesRow >= 0 && changesRow < len(changes) {
+					return m.selectDashboardChange(changes[changesRow])
+				}
+			}
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == buttonY && msg.X > 1 && msg.X < leftPanelWidth {
+				if !m.workspaceRemote.Available {
+					if !m.commitCanCommit() {
+						return m, nil
+					}
+					return m.startWorkspaceCommit()
+				}
+				buttonWidth := max(1, (leftPanelWidth-4)/3)
+				switch min(2, max(0, (msg.X-2)/(buttonWidth+1))) {
+				case 0:
+					if !m.commitCanPull() {
+						return m, nil
+					}
+					return m.startWorkspaceRemoteAction("pull")
+				case 1:
+					if !m.commitCanPush() {
+						return m, nil
+					}
+					return m.startWorkspaceRemoteAction("push")
+				default:
+					if !m.commitCanCommit() {
+						return m, nil
+					}
+					return m.startWorkspaceCommit()
+				}
+			}
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X > 1 && msg.X < leftPanelWidth && msg.Y >= 7 && msg.Y < buttonY {
+				m.commitMessage.Focus()
+				m.focus = focusCommitMessage
+				return m, nil
+			}
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= 6 && msg.Y < m.height-3 {
+				if msg.X > leftPanelWidth+1 {
+					m.focus = focusWorkspacePreview
+				}
+				return m, nil
+			}
+		}
 		leftWidth, _ := m.workspacePaneWidths()
-		dividerStart, dividerEnd := leftWidth, leftWidth+2
-		bodyStart := 5
+		dividerStart, dividerEnd := leftWidth, leftWidth+1
+		bodyStart := 7
+		if m.workspaceCommitActive() {
+			bodyStart++
+		}
 		bodyEnd := bodyStart + m.workspaceListHeight()
 		if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y >= bodyStart && msg.Y < bodyEnd && msg.X >= dividerStart && msg.X <= dividerEnd {
 			m.workspaceDividerDragging = true
 			return m, nil
 		}
-		if m.workspaceCommitActive() && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 {
+		if m.workspaceCommitActive() && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 6 {
 			buttonWidth := lipgloss.Width(commitButtonStyle.Render("Commit"))
-			buttonStart := max(0, m.width-buttonWidth-1)
+			buttonStart := max(1, m.width-buttonWidth-2)
 			if msg.X >= buttonStart {
 				return m.startWorkspaceCommit()
 			}
@@ -2309,24 +2483,24 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.Button == tea.MouseButtonWheelUp {
-			if msg.X >= leftWidth+3 {
+			if msg.X >= leftWidth+1 {
 				return m.moveWorkspacePreview(-3), nil
 			}
 			return m.moveWorkspaceCursor(-3)
 		}
 		if msg.Button == tea.MouseButtonWheelDown {
-			if msg.X >= leftWidth+3 {
+			if msg.X >= leftWidth+1 {
 				return m.moveWorkspacePreview(3), nil
 			}
 			return m.moveWorkspaceCursor(3)
 		}
-		if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress || msg.Y < 5 {
+		if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress || msg.Y < bodyStart {
 			return m, nil
 		}
-		if msg.X >= leftWidth || msg.Y >= 5+m.workspaceListHeight() {
+		if msg.X >= leftWidth || msg.Y >= bodyStart+m.workspaceListHeight() {
 			return m, nil
 		}
-		row := msg.Y - 5
+		row := msg.Y - bodyStart
 		index := m.workspaceOffset + row
 		if m.workspaceCommitActive() {
 			index = m.workspaceChangeIndexAtRow(row)
@@ -2523,26 +2697,51 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen != listScreen {
 		return m, nil
 	}
-	if msg.Y == 4 {
-		if filter := m.filterAt(msg.X); filter >= 0 {
+	if msg.Y == 6 {
+		if filter := m.filterAt(msg.X - 1); filter >= 0 {
 			if m.workspace != nil && m.kind() == provider.Commits {
 				m.graphAuthorScope = filter
+				m.focus = focusGraphFilters
+				m.graphFilter.Blur()
 			} else {
 				m.filterIndex[m.kind()] = filter
+				m.focus = focusListFilters
 			}
 			m.cursor[m.kind()], m.offset[m.kind()] = 0, 0
 			m.loadingList = false
 			return m.startListLoad()
 		}
 	}
-	if msg.Y >= 6 && msg.Y < 6+m.listHeight() {
-		index := m.offset[m.kind()] + msg.Y - 6
+	if msg.Y >= 9 && msg.Y < 9+m.listHeight() {
+		index := m.offset[m.kind()] + msg.Y - 9
 		if index >= 0 && index < len(m.items[m.kind()]) {
 			m.cursor[m.kind()] = index
 			return m.openSelected()
 		}
 	}
 	return m, nil
+}
+
+func (m Model) focusActiveFilter() (Model, tea.Cmd) {
+	m = m.blurInteractiveInputs()
+	if m.localTab() {
+		m.focus = focusFileFilter
+		return m, m.fileFilter.Focus()
+	}
+	if m.workspace != nil && m.kind() == provider.Commits {
+		m.focus = focusGraphFilters
+		return m, m.graphFilter.Focus()
+	}
+	m.focus = focusListSearch
+	return m, m.graphQuery.Focus()
+}
+
+func (m Model) blurInteractiveInputs() Model {
+	m.fileFilter.Blur()
+	m.commitMessage.Blur()
+	m.graphFilter.Blur()
+	m.graphQuery.Blur()
+	return m
 }
 
 func (m Model) handleWheelScroll(msg WheelScrollMsg) (tea.Model, tea.Cmd) {
@@ -2553,7 +2752,7 @@ func (m Model) handleWheelScroll(msg WheelScrollMsg) (tea.Model, tea.Cmd) {
 	lines := msg.Delta * linesPerWheelClick
 	if m.localTab() {
 		leftWidth, _ := m.workspacePaneWidths()
-		if msg.X >= leftWidth+3 {
+		if msg.X >= leftWidth+1 {
 			return m.moveWorkspacePreview(lines), nil
 		}
 		return m.moveWorkspaceCursor(lines)
@@ -2573,12 +2772,9 @@ func (m Model) handleWheelScroll(msg WheelScrollMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) tabAt(x int) int {
-	position := 1
+	position := 1 // Rounded left border.
 	labels := m.tabLabels()
 	start, end := m.tabRange(labels)
-	if start > 0 {
-		position += lipgloss.Width("‹ ")
-	}
 	for index := start; index < end; index++ {
 		name := labels[index]
 		label := fmt.Sprintf(" %d %s ", index+1, name)
@@ -2586,7 +2782,7 @@ func (m Model) tabAt(x int) int {
 		if x >= position && x < end {
 			return index
 		}
-		position = end + 1
+		position = end + 1 // Skip the vertical divider.
 	}
 	return -1
 }
@@ -2600,16 +2796,10 @@ func (m Model) tabRange(labels []string) (int, int) {
 	bestStart, bestEnd, bestCount, bestBalance := active, active+1, 1, len(labels)*2
 	for start := 0; start <= active; start++ {
 		for end := active + 1; end <= len(labels); end++ {
-			width := 1
-			if start > 0 {
-				width += lipgloss.Width("‹ ")
-			}
-			if end < len(labels) {
-				width += lipgloss.Width(" ›")
-			}
+			width := 3 // Left corner plus the content junction and right corner.
 			for index := start; index < end; index++ {
 				if index > start {
-					width++
+					width++ // Internal divider.
 				}
 				width += lipgloss.Width(fmt.Sprintf(" %d %s ", index+1, labels[index]))
 			}

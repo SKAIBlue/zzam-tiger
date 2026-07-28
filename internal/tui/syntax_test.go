@@ -39,6 +39,23 @@ func TestWorkspaceCodePreviewHighlightsAndKeepsVisibleWidth(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCodePreviewExpandsTabsBeforeTruncating(t *testing.T) {
+	file := worktree.File{
+		Path: "internal/provider/detect.go",
+		Data: []byte("\t\treturn fmt.Errorf(\"a deliberately long error message that must remain inside the preview panel\")\n"),
+	}
+	const width = 32
+	rendered := renderWorkspaceFileAt(file, width, 5, 0)
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.ContainsRune(ansi.Strip(line), '\t') {
+			t.Fatalf("preview retained a terminal tab: %q", line)
+		}
+		if got := ansi.StringWidth(line); got > width {
+			t.Fatalf("tabbed preview width = %d, want <= %d: %q", got, width, line)
+		}
+	}
+}
+
 func TestUnknownWorkspacePreviewRemainsPlain(t *testing.T) {
 	highlighter := newCodeHighlighter("notes.unknown-format")
 	const content = "plain text"

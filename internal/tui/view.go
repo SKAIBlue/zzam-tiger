@@ -12,46 +12,55 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
+	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
 
 var (
-	accent              = lipgloss.Color("#7D56F4")
-	green               = lipgloss.Color("#3DDC97")
-	red                 = lipgloss.Color("#FF6B6B")
-	muted               = lipgloss.Color("#7B8496")
-	text                = lipgloss.Color("#E6E9EF")
-	border              = lipgloss.Color("#4B5263")
-	headerPurple        = lipgloss.Color("#6C4EE3")
-	headerBlue          = lipgloss.Color("#2E86C1")
-	headerSlate         = lipgloss.Color("#273142")
-	headerStyle         = lipgloss.NewStyle().Bold(true).Foreground(text)
-	versionStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#61AFEF"))
-	tabStyle            = lipgloss.NewStyle().Foreground(muted)
-	activeTab           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent)
-	filterStyle         = lipgloss.NewStyle().Foreground(muted)
-	activeFilter        = lipgloss.NewStyle().Bold(true).Foreground(green).Underline(true)
-	selectedRow         = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#343B58"))
-	myAssignmentTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
-	metaStyle           = lipgloss.NewStyle().Foreground(muted)
-	errorStyle          = lipgloss.NewStyle().Foreground(red)
-	statusStyle         = lipgloss.NewStyle().Foreground(green)
-	sectionTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	detailBoxStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
-	composerStyle       = detailBoxStyle.Copy().BorderForeground(accent).Background(lipgloss.Color("#1B1F2A"))
-	addedLineStyle      = lipgloss.NewStyle().Background(lipgloss.Color("#203C2F"))
-	removedLineStyle    = lipgloss.NewStyle().Background(lipgloss.Color("#482B31"))
-	diffGapStyle        = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
-	reviewMetaStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
-	reviewBodyStyle     = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
-	selectedReviewStyle = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
-	commitButtonStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent).Padding(0, 1)
-	updateButtonStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(green).Padding(0, 1)
-	headerBrandStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(headerPurple).Padding(0, 1)
-	headerVersionStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#DCE7FF")).Background(headerBlue).Padding(0, 1)
-	headerContextStyle  = lipgloss.NewStyle().Foreground(text).Background(headerSlate).Padding(0, 1)
-	headerAccentStyle   = lipgloss.NewStyle().Foreground(headerPurple).Background(headerBlue)
-	headerContextEdge   = lipgloss.NewStyle().Foreground(headerBlue).Background(headerSlate)
-	headerWarningStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFE8E8")).Background(lipgloss.Color("#651C2A")).Padding(0, 1)
+	accent                     = lipgloss.Color("#7D56F4")
+	green                      = lipgloss.Color("#3DDC97")
+	red                        = lipgloss.Color("#FF6B6B")
+	muted                      = lipgloss.Color("#7B8496")
+	text                       = lipgloss.Color("#E6E9EF")
+	border                     = lipgloss.Color("#4B5263")
+	headerPurple               = lipgloss.Color("#6C4EE3")
+	headerBlue                 = lipgloss.Color("#2E86C1")
+	headerSlate                = lipgloss.Color("#273142")
+	headerStyle                = lipgloss.NewStyle().Bold(true).Foreground(text)
+	versionStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#61AFEF"))
+	tabStyle                   = lipgloss.NewStyle().Foreground(muted)
+	activeTab                  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent)
+	tabBoxStyle                = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border)
+	filterStyle                = lipgloss.NewStyle().Foreground(muted)
+	activeFilter               = lipgloss.NewStyle().Bold(true).Foreground(green).Underline(true)
+	focusedFilter              = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(accent)
+	selectedRow                = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#343B58"))
+	myAssignmentTitle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
+	metaStyle                  = lipgloss.NewStyle().Foreground(muted)
+	errorStyle                 = lipgloss.NewStyle().Foreground(red)
+	statusStyle                = lipgloss.NewStyle().Foreground(green)
+	sectionTitleStyle          = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	detailBoxStyle             = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(border).Padding(0, 1)
+	composerStyle              = detailBoxStyle.Copy().BorderForeground(accent).Background(lipgloss.Color("#1B1F2A"))
+	addedLineStyle             = lipgloss.NewStyle().Background(lipgloss.Color("#203C2F"))
+	removedLineStyle           = lipgloss.NewStyle().Background(lipgloss.Color("#482B31"))
+	diffGapStyle               = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
+	reviewMetaStyle            = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
+	reviewBodyStyle            = lipgloss.NewStyle().Foreground(text).BorderLeft(true).BorderStyle(lipgloss.ThickBorder()).BorderForeground(accent).PaddingLeft(1)
+	selectedReviewStyle        = lipgloss.NewStyle().Background(lipgloss.Color("#2D3348"))
+	commitButtonStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent).Padding(0, 1)
+	pullButtonStyle            = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(headerBlue)
+	pushButtonStyle            = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(green)
+	dashboardCommitButtonStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(accent)
+	disabledButtonStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#6B7280"))
+	stageArrowStyle            = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#E5C07B"))
+	unstageArrowStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#61AFEF"))
+	updateButtonStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(green).Padding(0, 1)
+	headerBrandStyle           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(headerPurple).Padding(0, 1)
+	headerVersionStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#DCE7FF")).Background(headerBlue).Padding(0, 1)
+	headerContextStyle         = lipgloss.NewStyle().Foreground(text).Background(headerSlate).Padding(0, 1)
+	headerAccentStyle          = lipgloss.NewStyle().Foreground(headerPurple).Background(headerBlue)
+	headerContextEdge          = lipgloss.NewStyle().Foreground(headerBlue).Background(headerSlate)
+	headerWarningStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFE8E8")).Background(lipgloss.Color("#651C2A")).Padding(0, 1)
 )
 
 func (m Model) View() string {
@@ -102,20 +111,22 @@ func (m Model) listView() string {
 	// delete command here makes Kitty consume the title row on some terminals.
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
-	lines = append(lines, strings.Repeat("─", max(1, m.width)))
+	contentStart := len(lines)
 	if m.remoteErr == nil && m.workspace != nil && m.kind() == provider.Commits {
 		query := m.graphFilter.View()
 		if !m.graphFilter.Focused() && m.graphFilter.Value() == "" {
 			query = metaStyle.Render("Filter: press / to search")
 		}
-		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
+		lines = append(lines, contentBoxRaw(filterContentBoxRow(" "+truncate(query, max(1, m.width-3)), m.width, m.filterFocused())))
+		lines = append(lines, contentBoxRaw(contentBoxDivider(m.width, m.filterFocused())))
 		lines = append(lines, m.filtersView())
 	} else if m.remoteErr == nil || m.workspace != nil && m.kind() == provider.Branches {
 		query := m.graphQuery.View()
 		if !m.graphQuery.Focused() && m.graphQuery.Value() == "" {
 			query = metaStyle.Render("Filter: press / to search")
 		}
-		lines = append(lines, " "+truncate(query, max(1, m.width-1)))
+		lines = append(lines, contentBoxRaw(filterContentBoxRow(" "+truncate(query, max(1, m.width-3)), m.width, m.filterFocused())))
+		lines = append(lines, contentBoxRaw(contentBoxDivider(m.width, m.filterFocused())))
 		lines = append(lines, m.filtersView())
 		if m.remoteErr != nil {
 			lines = append(lines, metaStyle.Render(" Remote integration unavailable"))
@@ -127,6 +138,7 @@ func (m Model) listView() string {
 		lines = append(lines, metaStyle.Render(" Local Git features unavailable: "+truncate(sanitizeWorkspaceLabel(m.localErr.Error()), max(1, m.width-34))))
 	}
 	lines = append(lines, "")
+	panelStart := len(lines)
 	items := m.visibleListItems()
 	if m.remoteErr != nil && !m.localGitList(m.kind()) {
 		lines = append(lines, errorStyle.Render("  "+truncate(sanitizeWorkspaceLabel(m.remoteErr.Error()), max(1, m.width-2))))
@@ -145,20 +157,422 @@ func (m Model) listView() string {
 			if showGraph {
 				selected := index == m.cursor[m.kind()]
 				lines = append(lines, m.graphItemRow(items[index], graphPrefixes[index], selected))
-				if selected {
-					lines = append(lines, m.graphFileRows(items[index])...)
-				}
 			} else {
 				lines = append(lines, m.itemRow(items[index], index == m.cursor[m.kind()]))
 			}
 		}
 	}
-	for len(lines) < m.height-2 {
+	bodyRows := append([]string(nil), lines[panelStart:]...)
+	panelHeight := m.listHeight() + 2
+	if m.kind() == provider.Commits {
+		rightRows := []string{}
+		if len(items) > 0 && m.cursor[m.kind()] >= 0 && m.cursor[m.kind()] < len(items) {
+			for _, row := range graphTreeRows(graphFilePaths(items[m.cursor[m.kind()]])) {
+				rightRows = append(rightRows, m.highlightSearchMatch(row))
+			}
+		}
+		leftWidth := max(12, (m.width-2)*2/3)
+		if len(rightRows) > 0 {
+			leftWidth = max(12, (m.width-2)/3)
+		}
+		rightWidth := max(1, m.width-2-leftWidth)
+		left := contentPanel("Commit Graph", bodyRows, leftWidth, panelHeight, m.focus == focusGraphCommits || m.focus == focusListItems)
+		right := contentPanel("Changed Files", rightRows, rightWidth, panelHeight, m.graphDepth == graphFileDepth)
+		bodyRows = strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, left, right), "\n")
+	} else {
+		bodyRows = strings.Split(contentPanel(m.activeTabLabel(), bodyRows, m.width-2, panelHeight, m.focus == focusListItems), "\n")
+	}
+	lines = append(lines[:panelStart], bodyRows...)
+	for renderedLineCount(lines) < m.height-3 {
 		lines = append(lines, "")
 	}
+	lines = append(lines[:contentStart], append(contentBoxRows(lines[contentStart:], m.width), contentBoxBottom(m.width))...)
 	lines = append(lines, m.statusLine())
 	lines = append(lines, metaStyle.Render(truncate(m.listHelp(), m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) workspaceCommitDashboard(lines []string) string {
+	panelHeight := max(1, m.height-9)
+	leftWidth, rightWidth := m.commitDashboardWidths()
+	filter := m.fileFilter.View()
+	if !m.fileFilter.Focused() {
+		value := m.fileFilter.Value()
+		if value == "" {
+			value = metaStyle.Render("press / to filter paths")
+		}
+		filter = "Filter: " + value
+	}
+	lines = append(lines, filterContentBoxRow(" "+truncate(filter, max(1, m.width-3)), m.width, m.filterFocused()))
+	lines = append(lines, dashboardContentDivider(leftWidth, rightWidth, m.filterFocused()))
+	messageRows := m.commitMessageRowCount(leftWidth)
+	commitHeight := min(panelHeight, messageRows+3)
+	remaining := max(0, panelHeight-commitHeight)
+	stagedHeight, changesHeight := m.commitChangePanelHeights(remaining)
+
+	left := m.commitPanel(leftWidth, commitHeight, messageRows)
+	if stagedHeight > 0 {
+		left += "\n" + m.changePanel("Staged", true, leftWidth, stagedHeight)
+	}
+	if changesHeight > 0 {
+		left += "\n" + m.changePanel("Changes", false, leftWidth, changesHeight)
+	}
+	right := m.fileDiffPanel(rightWidth, panelHeight)
+	panels := strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, left, right), "\n")
+	lines = append(lines, contentBoxRows(panels, m.width)...)
+	lines = append(lines, contentBoxBottom(m.width))
+	lines = append(lines, m.statusLine(), metaStyle.Render(truncate(m.workspaceFocusHelp(), m.width)))
+	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func dashboardContentDivider(leftWidth, rightWidth int, focused bool) string {
+	return filterBorderStyle(focused).Render("├" + strings.Repeat("─", max(1, leftWidth+rightWidth)) + "┤")
+}
+
+func (m Model) commitDashboardWidths() (int, int) {
+	contentWidth := max(2, m.width-2)
+	left := m.workspaceCommitWidth
+	if left <= 0 {
+		left = 48
+	}
+	left = max(24, left)
+	left = min(left, max(24, contentWidth-24))
+	return left, max(1, contentWidth-left)
+}
+
+func (m Model) commitMessageRowCount(leftWidth int) int {
+	return len(m.commitMessageSegments(max(1, leftWidth-4)))
+}
+
+type commitMessageSegment struct {
+	start int
+	end   int
+}
+
+func (m Model) commitMessageSegments(width int) []commitMessageSegment {
+	runes := []rune(m.commitMessage.Value())
+	if len(runes) == 0 {
+		return []commitMessageSegment{{}}
+	}
+	segments := make([]commitMessageSegment, 0, 1)
+	start, cells := 0, 0
+	for index, value := range runes {
+		if value == commitMessageNewlineRune {
+			segments = append(segments, commitMessageSegment{start: start, end: index})
+			start, cells = index+1, 0
+			continue
+		}
+		runeWidth := max(1, ansi.StringWidth(string(value)))
+		if cells > 0 && cells+runeWidth > width {
+			segments = append(segments, commitMessageSegment{start: start, end: index})
+			start, cells = index, 0
+		}
+		cells += runeWidth
+	}
+	segments = append(segments, commitMessageSegment{start: start, end: len(runes)})
+	if m.focus == focusCommitMessage && m.commitMessage.Position() == len(runes) && cells+1 > width {
+		segments = append(segments, commitMessageSegment{start: len(runes), end: len(runes)})
+	}
+	return segments
+}
+
+func (m Model) commitDashboardGeometry() (leftWidth, buttonY, changesTop int) {
+	leftWidth, _ = m.commitDashboardWidths()
+	messageRows := m.commitMessageRowCount(leftWidth)
+	panelHeight := max(1, m.height-9)
+	commitHeight := min(panelHeight, messageRows+3)
+	remaining := max(0, panelHeight-commitHeight)
+	stagedHeight, _ := m.commitChangePanelHeights(remaining)
+	buttonY = 7 + messageRows
+	changesTop = 6 + commitHeight + stagedHeight
+	return
+}
+
+func (m Model) commitChangePanelHeights(available int) (staged, changes int) {
+	if available <= 0 {
+		return 0, 0
+	}
+	stagedEmpty := len(m.workspaceStatus.Staged) == 0
+	changesEmpty := len(m.workspaceStatus.Unstaged)+len(m.workspaceStatus.Untracked) == 0
+	const emptyHeight = 3
+	switch {
+	case stagedEmpty && changesEmpty:
+		staged = min(emptyHeight, available)
+		changes = min(emptyHeight, max(0, available-staged))
+	case stagedEmpty:
+		staged = min(emptyHeight, available)
+		changes = max(0, available-staged)
+	case changesEmpty:
+		changes = min(emptyHeight, available)
+		staged = max(0, available-changes)
+	default:
+		staged = int(float64(available) * m.workspaceCommitSplitRatio)
+		staged = min(max(1, staged), max(1, available-1))
+		changes = max(0, available-staged)
+	}
+	return staged, changes
+}
+
+func dashboardPanelBorderStyle(focused bool) lipgloss.Style {
+	color := border
+	if focused {
+		color = accent
+	}
+	return lipgloss.NewStyle().Foreground(color)
+}
+
+func panelBorderLine(left, fill, right string, width int, focused bool) string {
+	return dashboardPanelBorderStyle(focused).Render(left + strings.Repeat(fill, max(0, width-2)) + right)
+}
+
+func titledPanelTop(title string, width int, focused bool) string {
+	label := "─ " + title + " "
+	return dashboardPanelBorderStyle(focused).Render("╭" + truncate(label, max(1, width-2)) + strings.Repeat("─", max(0, width-2-lipgloss.Width(label))) + "╮")
+}
+
+func panelRow(content string, width int, focused bool) string {
+	inner := max(1, width-2)
+	borderStyle := dashboardPanelBorderStyle(focused)
+	return borderStyle.Render("│") + lipgloss.NewStyle().Width(inner).Render(truncate(content, inner)) + borderStyle.Render("│")
+}
+
+func contentPanel(title string, content []string, width, height int, focused bool) string {
+	rows := []string{titledPanelTop(title, width, focused)}
+	for _, row := range content {
+		if len(rows) >= height-1 {
+			break
+		}
+		rows = append(rows, panelRow(row, width, focused))
+	}
+	for len(rows) < height-1 {
+		rows = append(rows, panelRow("", width, focused))
+	}
+	if height > 1 {
+		rows = append(rows, panelBorderLine("╰", "─", "╯", width, focused))
+	}
+	return strings.Join(rows[:min(len(rows), height)], "\n")
+}
+
+func (m Model) commitPanel(width, height, messageRows int) string {
+	focused := m.focus == focusCommitMessage
+	title := fmt.Sprintf("Commit ( %d↓ %d↑ )", m.workspaceRemote.Behind, m.workspaceRemote.Ahead)
+	rows := []string{titledPanelTop(title, width, focused)}
+	value := m.commitMessage.Value()
+	runes := []rune(value)
+	segments := m.commitMessageSegments(max(1, width-4))
+	cursorRow := -1
+	if focused && len(runes) > 0 {
+		position := m.commitMessage.Position()
+		for index, segment := range segments {
+			atLineBreak := position == segment.end && position < len(runes) && runes[position] == commitMessageNewlineRune
+			if position < segment.end || atLineBreak || position == len(runes) && index == len(segments)-1 {
+				cursorRow = index
+				break
+			}
+		}
+	}
+	for index := 0; index < messageRows && len(rows) < height-2; index++ {
+		content := ""
+		segment := segments[min(index, len(segments)-1)]
+		start, end := segment.start, segment.end
+		if len(runes) == 0 && index == 0 {
+			placeholder := []rune("Commit message")
+			if focused {
+				cursor := m.commitMessage.Cursor
+				cursor.TextStyle = metaStyle
+				cursor.SetChar(string(placeholder[0]))
+				content = cursor.View() + metaStyle.Render(string(placeholder[1:]))
+			} else {
+				content = metaStyle.Render(string(placeholder))
+			}
+		} else if start < len(runes) || focused && cursorRow == index {
+			position := m.commitMessage.Position()
+			cursorInRow := cursorRow == index
+			if focused && cursorInRow {
+				cursor := m.commitMessage.Cursor
+				cursor.TextStyle = m.commitMessage.TextStyle
+				before := string(runes[start:min(position, len(runes))])
+				if position < len(runes) && runes[position] != commitMessageNewlineRune {
+					cursor.SetChar(string(runes[position]))
+					content = before + cursor.View() + string(runes[position+1:end])
+				} else {
+					cursor.SetChar(" ")
+					content = before + cursor.View()
+				}
+			} else {
+				content = string(runes[start:end])
+			}
+		}
+		rows = append(rows, panelRow(" "+content, width, focused))
+	}
+	if len(rows) < height-1 {
+		labels := []string{"Commit"}
+		if m.workspaceRemote.Available {
+			labels = []string{"Pull", "Push", "Commit"}
+		}
+		available := max(1, width-2)
+		gapWidth := len(labels) - 1
+		buttonWidth := max(1, (available-gapWidth)/len(labels))
+		buttons := make([]string, 0, len(labels))
+		for _, label := range labels {
+			style := dashboardCommitButtonStyle
+			if label == "Pull" {
+				style = pullButtonStyle
+				if !m.commitCanPull() {
+					style = disabledButtonStyle
+				}
+			} else if label == "Push" {
+				style = pushButtonStyle
+				if !m.commitCanPush() {
+					style = disabledButtonStyle
+				}
+			} else if !m.commitCanCommit() {
+				style = disabledButtonStyle
+			}
+			buttons = append(buttons, style.Copy().Width(buttonWidth).Align(lipgloss.Center).Render(label))
+		}
+		rows = append(rows, panelRow(truncate(strings.Join(buttons, " "), available), width, focused))
+	}
+	for len(rows) < height-1 {
+		rows = append(rows, panelRow("", width, focused))
+	}
+	if height > 1 {
+		rows = append(rows, panelBorderLine("╰", "─", "╯", width, focused))
+	}
+	return strings.Join(rows[:min(len(rows), height)], "\n")
+}
+
+func (m Model) commitCanPull() bool {
+	return m.workspaceRemote.Available && m.workspaceRemote.Behind > 0
+}
+
+func (m Model) commitCanPush() bool {
+	return m.workspaceRemote.Available && m.workspaceRemote.Ahead > 0
+}
+
+func (m Model) commitCanCommit() bool {
+	return strings.TrimSpace(m.commitMessageText()) != "" && len(m.workspaceStatus.Staged) > 0
+}
+
+func (m Model) changePanel(title string, staged bool, width, height int) string {
+	focused := false
+	if m.focus == focusWorkspaceList {
+		changes := m.filteredWorkspaceChanges()
+		if m.workspaceCursor >= 0 && m.workspaceCursor < len(changes) {
+			focused = changes[m.workspaceCursor].staged == staged
+		} else {
+			focused = staged
+		}
+	}
+	rows := []string{titledPanelTop(title, width, focused)}
+	changes := m.dashboardPanelChanges(staged)
+	if len(changes) == 0 && len(rows) < height-1 {
+		emptyText := "No Changes Files"
+		if staged {
+			emptyText = "No Staging Files"
+		}
+		rows = append(rows, panelRow(" "+metaStyle.Render(emptyText), width, focused))
+	}
+	start := m.dashboardPanelStart(staged, height)
+	for index := start; index < len(changes) && len(rows) < height-1; index++ {
+		item := changes[index]
+		path := m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(item.name))
+		innerWidth := max(1, width-2)
+		indent := strings.Repeat("  ", item.depth)
+		if item.isDir {
+			marker := "▾ "
+			icon := renderDirectoryIcon(true)
+			if m.workspaceChangeCollapsed[workspaceChangeExpansionKey(staged, item.path)] {
+				marker = "▸ "
+				icon = renderDirectoryIcon(false)
+			}
+			label := indent + marker + icon + " " + path
+			if m.dashboardChangeSelected(item) {
+				label = selectedRow.Copy().Width(innerWidth).Render(truncate(ansi.Strip(label), innerWidth))
+			}
+			rows = append(rows, panelRow(label, width, focused))
+			continue
+		}
+		arrow := stageArrowStyle.Render("↑")
+		if staged {
+			arrow = unstageArrowStyle.Render("↓")
+		}
+		label := fmt.Sprintf("%s %c %s %s", indent, item.change.Code, renderWorkspaceFileIcon(item.path), path)
+		label = lipgloss.NewStyle().Width(max(1, innerWidth-1)).Render(truncate(label, max(1, innerWidth-1)))
+		row := label + arrow
+		if m.dashboardChangeSelected(item) {
+			row = selectedRow.Copy().Width(max(1, innerWidth-1)).Render(ansi.Strip(label)) + arrow
+		}
+		rows = append(rows, panelRow(row, width, focused))
+	}
+	for len(rows) < height-1 {
+		rows = append(rows, panelRow("", width, focused))
+	}
+	if height > 1 {
+		rows = append(rows, panelBorderLine("╰", "─", "╯", width, focused))
+	}
+	return strings.Join(rows[:min(len(rows), height)], "\n")
+}
+
+func (m Model) dashboardChangeSelected(item workspaceChange) bool {
+	if m.focus != focusWorkspaceList {
+		return false
+	}
+	changes := m.filteredWorkspaceChanges()
+	if m.workspaceCursor < 0 || m.workspaceCursor >= len(changes) {
+		return false
+	}
+	selected := changes[m.workspaceCursor]
+	return selected.staged == item.staged && selected.path == item.path && selected.isDir == item.isDir
+}
+
+func (m Model) dashboardPanelChanges(staged bool) []workspaceChange {
+	changes := m.workspaceStatus.Staged
+	if !staged {
+		changes = append(append([]worktree.Change{}, m.workspaceStatus.Unstaged...), m.workspaceStatus.Untracked...)
+	}
+	return m.visibleWorkspaceChangeTree(workspaceChangeTree(changes, staged))
+}
+
+func (m Model) dashboardPanelStart(staged bool, height int) int {
+	capacity := max(0, height-2)
+	changes := m.dashboardPanelChanges(staged)
+	if capacity == 0 || len(changes) <= capacity || m.focus != focusWorkspaceList {
+		return 0
+	}
+	selectedIndex := -1
+	for index, change := range changes {
+		if m.dashboardChangeSelected(change) {
+			selectedIndex = index
+			break
+		}
+	}
+	if selectedIndex >= capacity {
+		return selectedIndex - capacity + 1
+	}
+	return 0
+}
+
+func (m Model) fileDiffPanel(width, height int) string {
+	focused := m.focus == focusWorkspacePreview
+	rows := []string{titledPanelTop("File Diff", width, focused)}
+	content := cropWorkspaceRows(m.workspaceDiffRows, max(1, height-2), m.workspacePreviewOffset)
+	if m.workspacePreviewErr != nil {
+		content = errorStyle.Render("Unable to load preview: " + sanitizeWorkspaceLabel(m.workspacePreviewErr.Error()))
+	}
+	for _, row := range strings.Split(content, "\n") {
+		if len(rows) >= height-1 {
+			break
+		}
+		rows = append(rows, panelRow(row, width, focused))
+	}
+	for len(rows) < height-1 {
+		rows = append(rows, panelRow("", width, focused))
+	}
+	if height > 1 {
+		rows = append(rows, panelBorderLine("╰", "─", "╯", width, focused))
+	}
+	return strings.Join(rows[:min(len(rows), height)], "\n")
 }
 
 func (m Model) activeTabLabel() string {
@@ -182,9 +596,11 @@ func (m Model) tabsView() string {
 	labels := m.tabLabels()
 	start, end := m.tabRange(labels)
 	parts := make([]string, 0, end-start)
+	widths := make([]int, 0, end-start)
 	for index := start; index < end; index++ {
 		name := labels[index]
 		label := fmt.Sprintf(" %d %s ", index+1, name)
+		widths = append(widths, lipgloss.Width(label))
 		if index == m.active {
 			style := activeTab
 			if m.focus == focusTabs {
@@ -195,14 +611,37 @@ func (m Model) tabsView() string {
 			parts = append(parts, tabStyle.Render(label))
 		}
 	}
-	leading, trailing := " ", ""
-	if start > 0 {
-		leading += metaStyle.Render("‹ ")
+	borderStyle := lipgloss.NewStyle().Foreground(m.tabBorderStyle().GetBorderTopForeground())
+	top := "╭"
+	middle := borderStyle.Render("│")
+	bottom := "├"
+	for index, width := range widths {
+		top += strings.Repeat("─", width)
+		bottom += strings.Repeat("─", width)
+		if index < len(widths)-1 {
+			top += "┬"
+			bottom += "┴"
+			middle += parts[index] + borderStyle.Render("│")
+		} else {
+			top += "╮"
+			bottom += "┴"
+			middle += parts[index] + borderStyle.Render("│")
+		}
 	}
-	if end < len(labels) {
-		trailing = metaStyle.Render(" ›")
+	extension := max(0, m.width-lipgloss.Width(bottom)-1)
+	bottom += strings.Repeat("─", extension) + "╮"
+	bottomStyle := borderStyle
+	if m.filterFocused() {
+		bottomStyle = lipgloss.NewStyle().Foreground(accent)
 	}
-	return leading + strings.Join(parts, " ") + trailing
+	return strings.Join([]string{borderStyle.Render(top), middle, bottomStyle.Render(bottom)}, "\n")
+}
+
+func (m Model) tabBorderStyle() lipgloss.Style {
+	if m.focus == focusTabs {
+		return tabBoxStyle.Copy().BorderForeground(accent)
+	}
+	return tabBoxStyle
 }
 
 func (m Model) workspaceView() string {
@@ -214,7 +653,10 @@ func (m Model) workspaceView() string {
 	title := fmt.Sprintf("  local %s · remote %s", sanitizeWorkspaceLabel(m.workspace.Root()), remote)
 	lines = append(lines, m.headerView(title))
 	lines = append(lines, m.tabsView())
-	lines = append(lines, strings.Repeat("─", max(1, m.width)))
+	if m.workspaceCommitActive() {
+		return m.workspaceCommitDashboard(lines)
+	}
+	contentStart := len(lines)
 	filter := m.fileFilter.View()
 	if !m.fileFilter.Focused() {
 		value := m.fileFilter.Value()
@@ -223,41 +665,112 @@ func (m Model) workspaceView() string {
 		}
 		filter = "Filter: " + value
 	}
-	lines = append(lines, " "+truncate(filter, max(1, m.width-1)))
+	lines = append(lines, contentBoxRaw(filterContentBoxRow(" "+truncate(filter, max(1, m.width-3)), m.width, m.filterFocused())))
+	leftWidth, rightWidth := m.workspacePaneWidths()
+	lines = append(lines, contentBoxRaw(workspaceContentDivider(leftWidth, rightWidth, m.filterFocused())))
+	rightWidth += 3 // Reuse the removed divider width in the Preview panel.
 	if m.workspaceCommitActive() {
 		lines = append(lines, m.workspaceCommitComposer())
-	} else {
-		lines = append(lines, "")
 	}
 
-	bodyHeight := m.workspaceListHeight()
-	leftWidth, rightWidth := m.workspacePaneWidths()
-	left := m.workspaceList(leftWidth, bodyHeight)
+	contentHeight := m.workspaceListHeight()
+	bodyHeight := contentHeight + 2
+	leftContentWidth := max(1, leftWidth-2)
+	rightContentWidth := max(1, rightWidth-2)
+	left := m.workspaceList(leftContentWidth, contentHeight)
 	right := ""
 	if m.workspacePreviewErr != nil {
-		right = errorStyle.Render("Unable to load preview: " + truncate(sanitizeWorkspaceLabel(m.workspacePreviewErr.Error()), max(1, rightWidth-24)))
+		right = errorStyle.Render("Unable to load preview: " + truncate(sanitizeWorkspaceLabel(m.workspacePreviewErr.Error()), max(1, rightContentWidth-24)))
 	} else if m.workspaceFilesActive() {
-		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightWidth, bodyHeight, m.workspacePreviewOffset)
+		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightContentWidth, contentHeight, m.workspacePreviewOffset)
 	} else {
 		if len(m.workspaceDiffRows) == 0 {
 			right = metaStyle.Render("Select a changed file to inspect its diff.")
 		} else {
-			right = cropWorkspaceRows(m.workspaceDiffRows, bodyHeight, m.workspacePreviewOffset)
+			right = cropWorkspaceRows(m.workspaceDiffRows, contentHeight, m.workspacePreviewOffset)
 		}
 	}
+	left = contentPanel("File List", strings.Split(left, "\n"), leftWidth, bodyHeight, m.focus == focusWorkspaceList)
+	right = contentPanel("Preview", strings.Split(right, "\n"), rightWidth, bodyHeight, m.focus == focusWorkspacePreview)
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		lipgloss.NewStyle().Width(leftWidth).Height(bodyHeight).Render(left),
-		m.workspaceDividerView(bodyHeight),
 		lipgloss.NewStyle().Width(rightWidth).Height(bodyHeight).Render(right),
 	)
 	lines = append(lines, strings.Split(body, "\n")...)
-	for len(lines) < m.height-2 {
+	for renderedLineCount(lines) < m.height-3 {
 		lines = append(lines, "")
 	}
+	lines = append(lines[:contentStart], append(contentBoxRows(lines[contentStart:], m.width), contentBoxBottom(m.width))...)
 	lines = append(lines, m.statusLine())
 	help := m.workspaceFocusHelp()
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func renderedLineCount(lines []string) int {
+	count := 0
+	for _, line := range lines {
+		count += strings.Count(line, "\n") + 1
+	}
+	return count
+}
+
+func contentBoxRows(lines []string, width int) []string {
+	innerWidth := max(1, width-2)
+	style := lipgloss.NewStyle().Foreground(border)
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.HasPrefix(line, contentBoxRawPrefix) {
+			result = append(result, strings.TrimPrefix(line, contentBoxRawPrefix))
+			continue
+		}
+		content := lipgloss.NewStyle().Width(innerWidth).Render(truncate(line, innerWidth))
+		result = append(result, style.Render("│")+content+style.Render("│"))
+	}
+	return result
+}
+
+const contentBoxRawPrefix = "\x00content-box-raw:"
+
+func contentBoxRaw(line string) string { return contentBoxRawPrefix + line }
+
+func contentBoxDivider(width int, focused bool) string {
+	innerWidth := max(1, width-2)
+	return filterBorderStyle(focused).Render("├" + strings.Repeat("─", innerWidth) + "┤")
+}
+
+func workspaceContentDivider(leftWidth, rightWidth int, focused bool) string {
+	return filterBorderStyle(focused).Render("├" + strings.Repeat("─", max(1, leftWidth+rightWidth+3)) + "┤")
+}
+
+func filterBorderStyle(focused bool) lipgloss.Style {
+	color := border
+	if focused {
+		color = accent
+	}
+	return lipgloss.NewStyle().Foreground(color)
+}
+
+func filterContentBoxRow(content string, width int, focused bool) string {
+	innerWidth := max(1, width-2)
+	line := lipgloss.NewStyle().Width(innerWidth).Render(truncate(content, innerWidth))
+	style := filterBorderStyle(focused)
+	return style.Render("│") + line + style.Render("│")
+}
+
+func (m Model) filterFocused() bool {
+	if m.localTab() {
+		return m.fileFilter.Focused()
+	}
+	if m.workspace != nil && m.kind() == provider.Commits {
+		return m.graphFilter.Focused()
+	}
+	return m.graphQuery.Focused()
+}
+
+func contentBoxBottom(width int) string {
+	innerWidth := max(1, width-2)
+	return lipgloss.NewStyle().Foreground(border).Render("╰" + strings.Repeat("─", innerWidth) + "╯")
 }
 
 func (m Model) workspaceFocusHelp() string {
@@ -265,7 +778,7 @@ func (m Model) workspaceFocusHelp() string {
 	case focusTabs:
 		return "Tabs focused · ←/→ switch tabs · ↓ enter content"
 	case focusCommitMessage:
-		return "Commit message focused · type to edit · ↓ changed files · Enter commit"
+		return "Commit message focused · Enter newline · Ctrl+S commit · ↓ changed files"
 	case focusFileFilter:
 		if m.workspaceCommitActive() {
 			return "Search focused · type to filter files · ↓ commit message"
@@ -284,26 +797,19 @@ func (m Model) workspaceFocusHelp() string {
 }
 
 func (m Model) workspaceDividerView(height int) string {
-	divider := lipgloss.NewStyle().Foreground(border)
-	glyph := " ┃ "
-	if m.workspaceDividerDragging {
-		divider = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	}
 	rows := make([]string, max(1, height))
-	for index := range rows {
-		rows[index] = divider.Render(glyph)
-	}
 	return strings.Join(rows, "\n")
 }
 
 func (m Model) workspaceCommitComposer() string {
 	const label = " Commit message: "
 	button := commitButtonStyle.Render("Commit")
-	inputWidth := max(1, m.width-lipgloss.Width(label)-lipgloss.Width(button)-2)
+	contentWidth := max(1, m.width-2)
+	inputWidth := max(1, contentWidth-lipgloss.Width(label)-lipgloss.Width(button)-2)
 	input := m.commitMessage
 	input.Width = inputWidth
 	field := lipgloss.NewStyle().Width(inputWidth).Render(input.View())
-	return truncate(label+field+" "+button, m.width)
+	return truncate(label+field+" "+button, contentWidth)
 }
 
 func (m Model) headerView(title string) string {
@@ -360,30 +866,30 @@ func (m Model) workspaceList(width, height int) string {
 	}
 	rows := make([]string, 0, height)
 	if m.workspaceFilesActive() {
-		entries := m.filteredWorkspaceEntries()
-		start := min(m.workspaceOffset, len(entries))
-		for index := start; index < len(entries) && len(rows) < height; index++ {
-			entry := entries[index]
-			depth := strings.Count(entry.Path, "/")
+		displays := m.filteredWorkspaceEntryDisplays()
+		start := min(m.workspaceOffset, len(displays))
+		for index := start; index < len(displays) && len(rows) < height; index++ {
+			display := displays[index]
+			entry := display.entry
 			prefix := "  "
-			icon := workspaceFileIcon(entry.Name)
+			icon := renderWorkspaceFileIcon(entry.Name)
 			if entry.IsDir {
 				prefix = "▸ "
-				icon = directoryIcon
+				icon = renderDirectoryIcon(false)
 				if m.workspaceExpanded[entry.Path] {
 					prefix = "▾ "
-					icon = directoryOpenIcon
+					icon = renderDirectoryIcon(true)
 				}
 			}
 			name := m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(entry.Name))
-			row := strings.Repeat("  ", depth) + prefix + icon + " " + name
+			row := strings.Repeat("  ", display.depth) + prefix + icon + " " + name
 			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 			if index == m.workspaceCursor {
 				row = selectedRow.Render(row)
 			}
 			rows = append(rows, row)
 		}
-		if len(entries) == 0 {
+		if len(displays) == 0 {
 			rows = append(rows, metaStyle.Render(" No matching files."))
 		}
 		return strings.Join(rows, "\n")
@@ -399,14 +905,14 @@ func (m Model) workspaceList(width, height int) string {
 		change := item.change
 		badge := string(change.Code)
 		prefix := "  "
-		icon := workspaceFileIcon(item.displayPath())
+		icon := renderWorkspaceFileIcon(item.displayPath())
 		if item.isDir {
 			badge = " "
 			prefix = "▾ "
-			icon = directoryOpenIcon
+			icon = renderDirectoryIcon(true)
 			if m.workspaceChangeCollapsed[workspaceChangeExpansionKey(item.staged, item.path)] {
 				prefix = "▸ "
-				icon = directoryIcon
+				icon = renderDirectoryIcon(false)
 			}
 		} else if badge == "?" {
 			badge = "U"
@@ -435,7 +941,9 @@ func (m Model) filtersView() string {
 		parts := make([]string, 0, len(scopes))
 		for index, scope := range scopes {
 			label := " " + scope + " "
-			if index == m.graphAuthorScope {
+			if index == m.graphAuthorScope && m.focus == focusGraphFilters && !m.graphFilter.Focused() {
+				parts = append(parts, focusedFilter.Render(label))
+			} else if index == m.graphAuthorScope {
 				parts = append(parts, activeFilter.Render(label))
 			} else {
 				parts = append(parts, filterStyle.Render(label))
@@ -447,7 +955,9 @@ func (m Model) filtersView() string {
 	parts := make([]string, 0, len(filters))
 	for index, filter := range filters {
 		label := " " + filter.Label + " "
-		if index == m.filterIndex[m.kind()] {
+		if index == m.filterIndex[m.kind()] && m.focus == focusListFilters {
+			parts = append(parts, focusedFilter.Render(label))
+		} else if index == m.filterIndex[m.kind()] {
 			parts = append(parts, activeFilter.Render(label))
 		} else {
 			parts = append(parts, filterStyle.Render(label))
@@ -632,12 +1142,12 @@ func graphTreeRows(paths []string) []string {
 					child = next
 				}
 			}
-			rows = append(rows, strings.Repeat("  ", depth)+"▾ "+directoryOpenIcon+" "+label)
+			rows = append(rows, strings.Repeat("  ", depth)+"▾ "+renderDirectoryIcon(true)+" "+label)
 			render(child, depth+1)
 		}
 		sort.Strings(node.files)
 		for _, name := range node.files {
-			rows = append(rows, strings.Repeat("  ", depth)+"  "+workspaceFileIcon(name)+" "+name)
+			rows = append(rows, strings.Repeat("  ", depth)+"  "+renderWorkspaceFileIcon(name)+" "+name)
 		}
 	}
 	render(root, 0)
@@ -707,10 +1217,19 @@ func (m Model) listHelp() string {
 		case focusTabs:
 			return "Tabs focused · ←/→ switch tabs · ↓ graph filters · r refresh · q quit"
 		case focusGraphFilters:
-			return "Graph filters focused · ↓ commit navigation · / search · ←/→ author scope · r refresh · q quit"
+			if m.graphFilter.Focused() {
+				return "Graph search focused · type to filter · ↓ author filters · ↑ tabs · r refresh · q quit"
+			}
+			return "Graph author filters focused · ←/→ select · ↑ search · ↓ commit navigation · r refresh · q quit"
 		case focusGraphCommits:
 			return "Graph commits focused · ↑ at first returns to filters · → changed files · / search · r refresh · q quit"
 		}
+	}
+	if m.focus == focusListSearch {
+		return "Search focused · type to filter · ↓ filter options · ↑ tabs · Esc results"
+	}
+	if m.focus == focusListFilters {
+		return "Filter options focused · ←/→ select · ↑ search · ↓ results · r refresh · q quit"
 	}
 	help := fmt.Sprintf(" ↑/↓ select · ←/→ filter · Shift+1...%d tabs · Enter detail", m.tabCount())
 	if m.workspace != nil && m.kind() == provider.Commits {

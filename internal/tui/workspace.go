@@ -23,6 +23,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"golang.org/x/sys/unix"
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
@@ -39,6 +40,9 @@ type workspaceClient interface {
 	Unstage(context.Context, string) error
 	UnstageAll(context.Context) error
 	Commit(context.Context, string) error
+	RemoteState(context.Context) (worktree.RemoteState, error)
+	Pull(context.Context) error
+	Push(context.Context) error
 	Diff(context.Context, string, bool) (worktree.Diff, error)
 	History(context.Context, int) ([]worktree.Commit, error)
 	CommitPaths(context.Context, string) ([]string, error)
@@ -56,6 +60,7 @@ type workspaceResultMsg struct {
 	entries   []worktree.Entry
 	file      worktree.File
 	status    worktree.Status
+	remote    worktree.RemoteState
 	diff      worktree.Diff
 	image     string
 	rows      []string
@@ -76,6 +81,15 @@ type workspaceActionResultMsg struct {
 	request uint64
 	action  string
 	err     error
+}
+
+func (m Model) fetchWorkspaceRemoteStateCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		remote, err := m.workspace.RemoteState(ctx)
+		return workspaceRemoteResultMsg{remote: remote, err: err}
+	}
 }
 
 type workspaceChange struct {
@@ -112,7 +126,11 @@ func (m Model) fetchWorkspaceCmd(request uint64) tea.Cmd {
 			return workspaceResultMsg{request: request, op: "entries", entries: groups[0].entries, entryDirs: groups}
 		}
 		status, err := m.workspace.Status(ctx)
-		return workspaceResultMsg{request: request, op: "status", status: status, err: err}
+		if err != nil {
+			return workspaceResultMsg{request: request, op: "status", err: err}
+		}
+		remote, _ := m.workspace.RemoteState(ctx)
+		return workspaceResultMsg{request: request, op: "status", status: status, remote: remote}
 	}
 }
 
@@ -177,7 +195,7 @@ func (m Model) workspaceImageDimensions() (int, int) {
 }
 
 func (m Model) fetchWorkspaceDiffCmd(request uint64, path string, staged bool) tea.Cmd {
-	_, width := m.workspacePaneWidths()
+	width := m.workspaceDiffRenderWidth()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -242,6 +260,7 @@ func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
 	m.fileFilter.Blur()
 	m.commitMessage.Blur()
 	m.graphFilter.Blur()
+	m.graphQuery.Blur()
 	m.loadingList = false
 	m.workspaceLoading = false
 	m.workspacePreviewLoading = false
@@ -289,6 +308,10 @@ func (m Model) updateWorkspaceFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			next, cmd := m.startActiveTabLoad()
 			return next, cmd, true
 		case "down":
+			if m.workspaceCommitActive() {
+				m.focus = focusFileFilter
+				return m, m.fileFilter.Focus(), true
+			}
 			m.focus = focusFileFilter
 			return m, m.fileFilter.Focus(), true
 		}
@@ -298,9 +321,10 @@ func (m Model) updateWorkspaceFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			m.focus = focusFileFilter
 			return m, m.fileFilter.Focus(), true
 		}
-		if key == "down" || key == "enter" {
+		if key == "down" {
 			m.commitMessage.Blur()
 			m.focus = focusWorkspaceList
+			m.clampWorkspaceCursor(len(m.filteredWorkspaceChanges()))
 			return m, nil, true
 		}
 	case focusFileFilter:
@@ -316,6 +340,7 @@ func (m Model) updateWorkspaceFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 				return m, m.commitMessage.Focus(), true
 			}
 			m.focus = focusWorkspaceList
+			m.clampWorkspaceCursor(len(m.filteredWorkspaceEntries()))
 			return m, nil, true
 		}
 	case focusWorkspaceList:
@@ -456,6 +481,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 			return m, nil
 		}
 		m.workspaceStatus = msg.status
+		m.workspaceRemote = msg.remote
 		changes := m.filteredWorkspaceChanges()
 		if m.workspacePendingPath != "" {
 			for index, change := range changes {
@@ -502,7 +528,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 		m.workspaceDiffRows = msg.rows
 		m.workspaceDiffWidth = msg.width
 		m.workspacePreviewLoading = false
-		_, width := m.workspacePaneWidths()
+		width := m.workspaceDiffRenderWidth()
 		if msg.width != width {
 			m.workspacePreviewRequest++
 			m.workspacePreviewLoading = true
@@ -584,13 +610,28 @@ func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 }
 
 func (m Model) filteredWorkspaceEntries() []worktree.Entry {
-	visible := m.visibleWorkspaceEntries()
+	displays := m.filteredWorkspaceEntryDisplays()
+	result := make([]worktree.Entry, 0, len(displays))
+	for _, display := range displays {
+		result = append(result, display.entry)
+	}
+	return result
+}
+
+type workspaceEntryDisplay struct {
+	entry worktree.Entry
+	depth int
+}
+
+func (m Model) filteredWorkspaceEntryDisplays() []workspaceEntryDisplay {
+	visible := m.visibleWorkspaceEntryDisplays()
 	query := strings.ToLower(strings.TrimSpace(m.fileFilter.Value()))
 	if query == "" {
 		return visible
 	}
 	keep := make(map[string]bool)
-	for _, entry := range visible {
+	for _, display := range visible {
+		entry := display.entry
 		if !strings.Contains(strings.ToLower(entry.Path), query) {
 			continue
 		}
@@ -604,16 +645,25 @@ func (m Model) filteredWorkspaceEntries() []worktree.Entry {
 			keep[parent] = true
 		}
 	}
-	result := make([]worktree.Entry, 0, len(visible))
-	for _, entry := range visible {
-		if keep[entry.Path] {
-			result = append(result, entry)
+	result := make([]workspaceEntryDisplay, 0, len(visible))
+	for _, display := range visible {
+		if keep[display.entry.Path] {
+			result = append(result, display)
 		}
 	}
 	return result
 }
 
 func (m Model) visibleWorkspaceEntries() []worktree.Entry {
+	displays := m.visibleWorkspaceEntryDisplays()
+	result := make([]worktree.Entry, 0, len(displays))
+	for _, display := range displays {
+		result = append(result, display.entry)
+	}
+	return result
+}
+
+func (m Model) visibleWorkspaceEntryDisplays() []workspaceEntryDisplay {
 	children := make(map[string][]worktree.Entry)
 	for _, entry := range m.workspaceEntries {
 		parent := workspaceParent(entry.Path)
@@ -622,9 +672,9 @@ func (m Model) visibleWorkspaceEntries() []worktree.Entry {
 	for parent := range children {
 		sort.Slice(children[parent], func(i, j int) bool { return children[parent][i].Path < children[parent][j].Path })
 	}
-	result := make([]worktree.Entry, 0, len(m.workspaceEntries))
-	var appendChildren func(string)
-	appendChildren = func(parent string) {
+	result := make([]workspaceEntryDisplay, 0, len(m.workspaceEntries))
+	var appendChildren func(string, int)
+	appendChildren = func(parent string, depth int) {
 		for _, entry := range children[parent] {
 			display := entry
 			for display.IsDir && m.workspaceExpanded[display.Path] && len(children[display.Path]) == 1 {
@@ -633,13 +683,13 @@ func (m Model) visibleWorkspaceEntries() []worktree.Entry {
 				display.Path = child.Path
 				display.IsDir = child.IsDir
 			}
-			result = append(result, display)
+			result = append(result, workspaceEntryDisplay{entry: display, depth: depth})
 			if display.IsDir && m.workspaceExpanded[display.Path] {
-				appendChildren(display.Path)
+				appendChildren(display.Path, depth+1)
 			}
 		}
 	}
-	appendChildren("")
+	appendChildren("", 0)
 	return result
 }
 
@@ -872,7 +922,13 @@ func (m *Model) ensureWorkspaceCursorVisible() {
 	}
 }
 
-func (m Model) workspaceListHeight() int { return max(1, m.height-8) }
+func (m Model) workspaceListHeight() int {
+	overhead := 11
+	if m.workspaceCommitActive() {
+		overhead++
+	}
+	return max(1, m.height-overhead)
+}
 
 func (m Model) workspaceChangeRows() []workspaceChangeRow {
 	changes := m.filteredWorkspaceChanges()
@@ -935,7 +991,7 @@ func workspacePaneWidthsAt(total int, ratio float64) (left, right int) {
 	if ratio > 0 {
 		left = int(float64(available)*ratio + 0.5)
 	} else {
-		left = min(42, max(12, total/3))
+		left = 42
 		if total < 64 {
 			left = max(workspacePaneMinWidth, (total-3)/2)
 		}
@@ -950,13 +1006,31 @@ func workspacePaneWidthsAt(total int, ratio float64) (left, right int) {
 }
 
 func (m Model) workspacePaneWidths() (left, right int) {
-	return workspacePaneWidthsAt(m.width, m.workspaceSplitRatio)
+	return workspacePaneWidthsAt(max(1, m.width-2), m.workspaceSplitRatio)
+}
+
+func (m Model) workspaceDiffRenderWidth() int {
+	if m.workspaceCommitActive() {
+		_, rightWidth := m.commitDashboardWidths()
+		return max(1, rightWidth-2)
+	}
+	_, width := m.workspacePaneWidths()
+	return width
 }
 
 func (m Model) resizeWorkspaceDivider(x int) (Model, tea.Cmd) {
-	available := max(2, m.width-3)
+	if m.workspaceCommitActive() {
+		m.workspaceCommitWidth = min(max(24, x-1), max(24, m.width-26))
+		if m.workspaceDiff.Path != "" {
+			m.workspacePreviewRequest++
+			m.workspacePreviewLoading = true
+			return m, m.renderWorkspaceDiffCmd(m.workspacePreviewRequest, m.workspaceDiff, m.workspaceDiffRenderWidth())
+		}
+		return m, nil
+	}
+	available := max(2, m.width-5)
 	dragRatio := max(1.0/float64(available), float64(x-1)/float64(available))
-	left, _ := workspacePaneWidthsAt(m.width, dragRatio)
+	left, _ := workspacePaneWidthsAt(max(1, m.width-2), dragRatio)
 	m.workspaceSplitRatio = float64(left) / float64(available)
 
 	if m.workspaceFilesActive() && m.workspaceFile.Image {
@@ -1015,6 +1089,8 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commitMessage.Blur()
 			return m, nil
 		case "enter":
+			return m.insertCommitMessageNewline(), nil
+		case "ctrl+s":
 			return m.startWorkspaceCommit()
 		}
 		var cmd tea.Cmd
@@ -1119,11 +1195,29 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) insertCommitMessageNewline() Model {
+	runes := []rune(m.commitMessage.Value())
+	position := min(max(0, m.commitMessage.Position()), len(runes))
+	value := make([]rune, 0, len(runes)+1)
+	value = append(value, runes[:position]...)
+	value = append(value, commitMessageNewlineRune)
+	value = append(value, runes[position:]...)
+	m.commitMessage.SetValue(string(value))
+	m.commitMessage.SetCursor(position + 1)
+	return m
+}
+
+const commitMessageNewlineRune = '\uE000'
+
+func (m Model) commitMessageText() string {
+	return strings.ReplaceAll(m.commitMessage.Value(), string(commitMessageNewlineRune), "\n")
+}
+
 func (m Model) startWorkspaceCommit() (tea.Model, tea.Cmd) {
 	if m.actionBusy {
 		return m, nil
 	}
-	message := strings.TrimSpace(m.commitMessage.Value())
+	message := strings.TrimSpace(m.commitMessageText())
 	if message == "" {
 		m.err = nil
 		m.status = "enter a commit message"
@@ -1145,6 +1239,25 @@ func (m Model) startWorkspaceCommit() (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) startWorkspaceRemoteAction(action string) (tea.Model, tea.Cmd) {
+	if m.actionBusy || !m.workspaceRemote.Available {
+		return m, nil
+	}
+	run := m.workspace.Pull
+	if action == "push" {
+		run = m.workspace.Push
+	}
+	m.actionBusy = true
+	m.err = nil
+	m.status = action + "ing…"
+	request := m.workspaceRequest
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		return workspaceActionResultMsg{request: request, action: action, err: run(ctx)}
+	}
+}
+
 func (m Model) toggleWorkspaceStage(key string) (tea.Model, tea.Cmd) {
 	changes := m.filteredWorkspaceChanges()
 	if len(changes) == 0 {
@@ -1161,6 +1274,10 @@ func (m Model) toggleWorkspaceStage(key string) (tea.Model, tea.Cmd) {
 	if key == "u" {
 		unstage = true
 	}
+	return m.startWorkspacePathStage(selected.displayPath(), unstage)
+}
+
+func (m Model) startWorkspacePathStage(path string, unstage bool) (tea.Model, tea.Cmd) {
 	action := "stage"
 	run := m.workspace.Stage
 	if unstage {
@@ -1168,15 +1285,31 @@ func (m Model) toggleWorkspaceStage(key string) (tea.Model, tea.Cmd) {
 		run = m.workspace.Unstage
 	}
 	m.actionBusy = true
-	m.workspacePendingPath = selected.displayPath()
-	m.status = action + " " + sanitizeWorkspaceLabel(selected.displayPath()) + "…"
+	m.workspacePendingPath = path
+	m.status = action + " " + sanitizeWorkspaceLabel(path) + "…"
 	request := m.workspaceRequest
-	path := selected.displayPath()
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return workspaceActionResultMsg{request: request, action: action, err: run(ctx, path)}
 	}
+}
+
+func (m Model) selectDashboardChange(selected workspaceChange) (tea.Model, tea.Cmd) {
+	if selected.isDir {
+		key := workspaceChangeExpansionKey(selected.staged, selected.path)
+		m.workspaceChangeCollapsed[key] = !m.workspaceChangeCollapsed[key]
+		return m, nil
+	}
+	changes := m.filteredWorkspaceChanges()
+	for index, change := range changes {
+		if change.staged == selected.staged && change.displayPath() == selected.displayPath() {
+			m.workspaceCursor = index
+			break
+		}
+	}
+	m.focus = focusWorkspaceList
+	return m.loadSelectedWorkspaceItem()
 }
 
 func (m Model) toggleAllWorkspaceStages(key string) (tea.Model, tea.Cmd) {
@@ -1238,9 +1371,32 @@ func renderWorkspaceFileWithImageAt(file worktree.File, image string, width, hei
 	}
 	highlighter := newCodeHighlighter(file.Path)
 	for i := range lines {
-		lines[i] = truncate(highlighter.line(lines[i]), max(1, width))
+		// Terminals advance a tab to the next tab stop, while ANSI width helpers
+		// cannot infer that position reliably. Expand tabs before highlighting and
+		// truncating so a Preview row never wraps past its panel border.
+		lines[i] = truncate(highlighter.line(expandWorkspaceTabs(lines[i], 4)), max(1, width))
 	}
 	return kittyDeleteImage() + header + strings.Join(lines, "\n")
+}
+
+func expandWorkspaceTabs(line string, tabWidth int) string {
+	if !strings.ContainsRune(line, '\t') {
+		return line
+	}
+	tabWidth = max(1, tabWidth)
+	var expanded strings.Builder
+	column := 0
+	for _, value := range line {
+		if value == '\t' {
+			spaces := tabWidth - column%tabWidth
+			expanded.WriteString(strings.Repeat(" ", spaces))
+			column += spaces
+			continue
+		}
+		expanded.WriteRune(value)
+		column += max(0, ansi.StringWidth(string(value)))
+	}
+	return expanded.String()
 }
 
 var markdownImagePattern = regexp.MustCompile(`!\[[^\]]*\]\(([^\s)]+)(?:\s+['"][^'"]*['"])?\)`)
@@ -1390,7 +1546,10 @@ func kittyDeleteImage() string {
 	if !kittyGraphicsAvailable() {
 		return ""
 	}
-	return "\x1b_Ga=d,d=i,i=31,q=2\x1b\\"
+	// Some Kitty-compatible terminals advance or otherwise disturb the cursor
+	// while processing a delete command. Preserve the cursor so selecting a
+	// regular file after a directory/image cannot scroll the full-screen TUI.
+	return "\x1b7\x1b_Ga=d,d=i,i=31,q=2\x1b\\\x1b8"
 }
 
 func rasterizeSVG(data []byte, width, height int) ([]byte, error) {
