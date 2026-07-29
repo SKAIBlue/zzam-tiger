@@ -649,6 +649,91 @@ func TestClosingIssueFromDetailRefreshesList(t *testing.T) {
 	}
 }
 
+func milestoneDetailModel(backend provider.Provider) Model {
+	m := New(backend, 0)
+	m.active = 2 // Milestones
+	m.width, m.height = 110, 30
+	m.resizeViewport()
+	m.screen = detailScreen
+	m.selected = provider.Item{ID: "7", Title: "v1", State: "open"}
+	m.detail = provider.Detail{Item: m.selected, Body: "Release scope", Issues: []provider.Item{
+		{ID: "11", Title: "unassigned open", State: "open"},
+		{ID: "12", Title: "mine", State: "open", AssignedToMe: true, Assignees: []provider.Assignee{{ID: "3", Login: "me"}}},
+		{ID: "13", Title: "someone else's", State: "opened", Assignees: []provider.Assignee{{ID: "4", Login: "other"}}},
+		{ID: "14", Title: "done", State: "closed"},
+	}}
+	m.setDetailContent()
+	return m
+}
+
+func TestMilestoneDetailFiltersIssues(t *testing.T) {
+	m := milestoneDetailModel(fakeProvider{})
+	if got := m.filteredMilestoneIssues(); len(got) != 3 {
+		t.Fatalf("open issues = %#v, want three", got)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if got := m.filteredMilestoneIssues(); len(got) != 1 || got[0].ID != "12" {
+		t.Fatalf("assigned-to-me issues = %#v", got)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if got := m.filteredMilestoneIssues(); len(got) != 2 || got[0].ID != "12" || got[1].ID != "13" {
+		t.Fatalf("in-progress issues = %#v", got)
+	}
+
+	view := ansi.Strip(m.View())
+	for _, label := range []string{"Open", "Assigned to me", "In progress", "Closed", "All"} {
+		if !strings.Contains(view, label) {
+			t.Fatalf("milestone detail omitted filter %q:\n%s", label, view)
+		}
+	}
+}
+
+func TestMilestoneIssueOpensExistingIssueDetailAndReturns(t *testing.T) {
+	m := milestoneDetailModel(fakeProvider{})
+	m.milestoneIssueCursor = 1
+	updated, load := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if load == nil || !m.hasMilestoneParent || m.currentDetailKind() != provider.Issues || m.selected.ID != "12" {
+		t.Fatalf("nested issue did not open: parent=%t kind=%v selected=%#v", m.hasMilestoneParent, m.currentDetailKind(), m.selected)
+	}
+	request := m.detailRequest
+	updated, _ = m.Update(detailResultMsg{request: request, kind: provider.Issues, item: m.selected, detail: provider.Detail{Item: m.selected, Body: "Issue body"}})
+	m = updated.(Model)
+	updated, refresh := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if refresh == nil || m.hasMilestoneParent || m.currentDetailKind() != provider.Milestones || m.selected.ID != "7" || !strings.Contains(ansi.Strip(m.viewport.View()), "Release scope") {
+		t.Fatalf("Esc did not restore milestone: parent=%t kind=%v selected=%#v view=%q", m.hasMilestoneParent, m.currentDetailKind(), m.selected, ansi.Strip(m.viewport.View()))
+	}
+}
+
+func TestMilestoneIssueStateAndAssignmentActionsUseIssueProvider(t *testing.T) {
+	backend := &actionProvider{}
+	m := milestoneDetailModel(backend)
+	m.milestoneIssueCursor = 1
+
+	updated, closeIssue := m.Update(key('c'))
+	m = updated.(Model)
+	if closeIssue == nil {
+		t.Fatal("milestone issue close did not start")
+	}
+	_ = closeIssue()
+	if len(backend.states) != 1 || backend.states[0] {
+		t.Fatalf("milestone issue state calls = %#v", backend.states)
+	}
+	m.actionBusy = false
+	updated, assignIssue := m.Update(key('a'))
+	if assignIssue == nil {
+		t.Fatal("milestone issue assignment did not start")
+	}
+	_ = assignIssue()
+	if len(backend.assignments) != 1 || backend.assignments[0].kind != provider.Issues || backend.assignments[0].item.ID != "12" {
+		t.Fatalf("milestone issue assignment calls = %#v", backend.assignments)
+	}
+}
+
 func TestAssignmentShortcutsWorkFromList(t *testing.T) {
 	for _, test := range []struct {
 		key      rune

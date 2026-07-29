@@ -305,6 +305,65 @@ func TestProvidersExposeAssignedToMeFilters(t *testing.T) {
 	}
 }
 
+func TestGitHubMilestoneDetailIncludesIssues(t *testing.T) {
+	runner := &fakeRunner{run: func(_ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		switch {
+		case strings.Contains(command, "repos/owner/repo/milestones/7"):
+			return []byte(`{"title":"v1","state":"open","creator":{"login":"owner"},"open_issues":2,"closed_issues":1}`), nil
+		case strings.Contains(command, "repos/owner/repo/issues"):
+			return []byte(`[{"number":11,"title":"mine","state":"open","user":{"login":"author"},"assignees":[{"id":3,"login":"me"}]},{"number":12,"title":"closed","state":"closed","user":{"login":"author"}},{"number":13,"title":"pull request","state":"open","user":{"login":"author"},"pull_request":{}}]`), nil
+		case strings.Contains(command, "--method GET user"):
+			return []byte(`{"id":3,"login":"me"}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + command)
+		}
+	}}
+	g := &GitHub{runner: runner, repo: "owner/repo"}
+
+	detail, err := g.Detail(context.Background(), Milestones, Item{ID: "7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Issues) != 2 || !detail.Issues[0].AssignedToMe || detail.Issues[1].State != "closed" {
+		t.Fatalf("unexpected milestone issues: %#v", detail.Issues)
+	}
+	command := strings.Join(runner.calls[1], " ")
+	for _, want := range []string{"repos/owner/repo/issues", "milestone=7", "state=all", "per_page=100"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("GitHub milestone issue request omitted %q: %s", want, command)
+		}
+	}
+}
+
+func TestGitLabMilestoneDetailIncludesIssues(t *testing.T) {
+	runner := &fakeRunner{run: func(_ string, args ...string) ([]byte, error) {
+		command := strings.Join(args, " ")
+		switch {
+		case strings.Contains(command, "milestones/9/issues?per_page=100"):
+			return []byte(`[{"iid":21,"title":"mine","state":"opened","author":{"username":"author"},"assignees":[{"id":4,"username":"me"}]},{"iid":22,"title":"closed","state":"closed","author":{"username":"author"}}]`), nil
+		case strings.Contains(command, "projects/group%2Fproject/milestones/9"):
+			return []byte(`{"id":9,"title":"v1","state":"active","stats":{"total":2,"closed":1}}`), nil
+		case strings.Contains(command, "api user "):
+			return []byte(`{"id":4,"username":"me"}`), nil
+		default:
+			return nil, errors.New("unexpected command: " + command)
+		}
+	}}
+	g := &GitLab{runner: runner, repo: "group/project", project: "group%2Fproject"}
+
+	detail, err := g.Detail(context.Background(), Milestones, Item{ID: "9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Issues) != 2 || !detail.Issues[0].AssignedToMe || detail.Issues[0].Meta != "#21 · author" {
+		t.Fatalf("unexpected milestone issues: %#v", detail.Issues)
+	}
+	if command := strings.Join(runner.calls[1], " "); !strings.Contains(command, "projects/group%2Fproject/milestones/9/issues?per_page=100") {
+		t.Fatalf("unexpected GitLab milestone issue request: %s", command)
+	}
+}
+
 func TestGitHubAssignedIssueFilterOnlyRequestsOpenItems(t *testing.T) {
 	runner := &fakeRunner{run: func(_ string, args ...string) ([]byte, error) {
 		command := strings.Join(args, " ")

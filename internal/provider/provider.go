@@ -143,6 +143,7 @@ type Detail struct {
 	Sections []Section
 	Labels   []string
 	Diffs    []DiffFile
+	Issues   []Item
 }
 
 type DiffLine struct {

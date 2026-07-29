@@ -176,11 +176,7 @@ func (m Model) listView() string {
 				rightRows = append(rightRows, m.highlightSearchMatch(row))
 			}
 		}
-		leftWidth := max(12, (m.width-2)*2/3)
-		if len(rightRows) > 0 {
-			leftWidth = max(12, (m.width-2)/3)
-		}
-		rightWidth := max(1, m.width-2-leftWidth)
+		leftWidth, rightWidth := m.graphPaneWidths(len(rightRows) > 0)
 		left := contentPanel("Commit Graph", bodyRows, leftWidth, panelHeight, m.focus == focusGraphCommits || m.focus == focusListItems)
 		right := contentPanel("Changed Files", rightRows, rightWidth, panelHeight, m.graphDepth == graphFileDepth)
 		bodyRows = strings.Split(lipgloss.JoinHorizontal(lipgloss.Top, left, right), "\n")
@@ -560,6 +556,35 @@ func contentPanel(title string, content []string, width, height int, focused boo
 		rows = append(rows, panelBorderLine("╰", "─", "╯", width, focused))
 	}
 	return strings.Join(rows[:min(len(rows), height)], "\n")
+}
+
+const graphPaneMinWidth = 12
+
+func graphPaneWidthsAt(total int, ratio float64, hasChangedFiles bool) (left, right int) {
+	total = max(2, total)
+	if ratio > 0 {
+		left = int(float64(total)*ratio + 0.5)
+	} else if hasChangedFiles {
+		left = max(graphPaneMinWidth, total/3)
+	} else {
+		left = max(graphPaneMinWidth, total*2/3)
+	}
+	if total >= graphPaneMinWidth*2 {
+		left = min(total-graphPaneMinWidth, max(graphPaneMinWidth, left))
+	} else {
+		left = min(total-1, max(1, left))
+	}
+	return left, max(1, total-left)
+}
+
+func (m Model) graphPaneWidths(hasChangedFiles bool) (left, right int) {
+	return graphPaneWidthsAt(max(2, m.width-2), m.graphSplitRatio, hasChangedFiles)
+}
+
+func (m Model) graphHasChangedFiles() bool {
+	items := m.visibleListItems()
+	index := m.cursor[m.kind()]
+	return index >= 0 && index < len(items) && len(items[index].Paths) > 0
 }
 
 func (m Model) commitPanel(width, height, messageRows int) string {
@@ -1184,9 +1209,13 @@ func (m Model) filtersView() string {
 }
 
 func (m Model) itemRow(item provider.Item, selected bool) string {
+	return m.itemRowForKind(item, selected, m.kind(), m.width)
+}
+
+func (m Model) itemRowForKind(item provider.Item, selected bool, kind provider.Kind, width int) string {
 	state := stateBadge(item.State)
 	metaParts := make([]string, 0, 3)
-	if assignableKind(m.kind()) {
+	if assignableKind(kind) {
 		metaParts = append(metaParts, assigneeLabel(item.Assignees))
 	}
 	if item.Meta != "" {
@@ -1197,7 +1226,7 @@ func (m Model) itemRow(item provider.Item, selected bool) string {
 	}
 	meta := strings.Join(metaParts, " · ")
 	prefix := " " + state + " "
-	contentWidth := max(1, m.width-lipgloss.Width(prefix)-1)
+	contentWidth := max(1, width-lipgloss.Width(prefix)-1)
 	metaWidth := min(lipgloss.Width(meta), max(0, contentWidth-8-1))
 	titleWidth := max(1, contentWidth-metaWidth)
 	if metaWidth > 0 {
@@ -1211,11 +1240,34 @@ func (m Model) itemRow(item provider.Item, selected bool) string {
 	if metaWidth > 0 {
 		row += " " + metaStyle.Render(m.highlightSearchMatch(truncate(meta, metaWidth)))
 	}
-	row = lipgloss.NewStyle().Width(max(1, m.width)).Render(row)
+	row = lipgloss.NewStyle().Width(max(1, width)).Render(row)
 	if selected {
 		return selectedRow.Render(row)
 	}
 	return row
+}
+
+func (m Model) milestoneIssuesPanel() string {
+	parts := make([]string, 0, len(milestoneIssueFilters))
+	for index, filter := range milestoneIssueFilters {
+		label := " " + filter.Label + " "
+		if index == m.milestoneIssueFilter {
+			parts = append(parts, activeFilter.Render(label))
+		} else {
+			parts = append(parts, filterStyle.Render(label))
+		}
+	}
+	rows := []string{" " + strings.Join(parts, " ")}
+	items := m.filteredMilestoneIssues()
+	if len(items) == 0 {
+		rows = append(rows, metaStyle.Render(" No issues for this filter."))
+	} else {
+		innerWidth := max(1, m.viewport.Width-4)
+		for index, issue := range items {
+			rows = append(rows, m.itemRowForKind(issue, index == m.milestoneIssueCursor, provider.Issues, innerWidth))
+		}
+	}
+	return contentPanel("Issues", rows, max(12, m.viewport.Width-2), len(rows)+2, true)
 }
 
 func (m Model) graphItemRow(item provider.Item, graph string, selected bool) string {
@@ -1531,6 +1583,7 @@ func stateBadge(state string) string {
 }
 
 func (m Model) detailView() string {
+	kind := m.currentDetailKind()
 	item := m.selected
 	if m.detail.Item.ID != "" {
 		item = m.detail.Item
@@ -1538,7 +1591,7 @@ func (m Model) detailView() string {
 	title := fmt.Sprintf(" ← Esc  %s  %s", stateBadge(item.State), item.Title)
 	lines := []string{m.headerView(title)}
 	metaParts := []string{item.Meta}
-	if assignableKind(m.kind()) {
+	if assignableKind(kind) {
 		metaParts = append(metaParts, assigneeLabel(item.Assignees))
 	}
 	metaParts = append(metaParts, item.URL)
@@ -1561,19 +1614,22 @@ func (m Model) detailView() string {
 	}
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ or wheel scroll · Esc back · r refresh"
-	if m.kind() == provider.PullRequests {
+	if kind == provider.PullRequests {
 		help += " · D diff · R review · N comment · M merge"
 	}
-	if m.kind() == provider.Commits {
+	if kind == provider.Commits {
 		help += " · D diff · N comment"
 	}
-	if m.kind() == provider.Issues {
+	if kind == provider.Issues {
 		help += " · N comment · C close · O open · L labels"
 	}
-	if m.kind() == provider.CIRuns {
+	if kind == provider.Milestones {
+		help = " ←/→ filter · ↑/↓ select issue · Enter issue detail · C close · O open · A assign · U unassign · PgUp/PgDn scroll · Esc back"
+	}
+	if kind == provider.CIRuns {
 		help += " · X cancel · R rerun"
 	}
-	if assignableKind(m.kind()) {
+	if assignableKind(kind) {
 		help += " · A assign · U unassign"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))
@@ -1602,7 +1658,7 @@ func (m Model) diffView() string {
 	lines = append(lines, m.viewport.View())
 	lines = append(lines, m.statusLine())
 	help := " h/l file · j/k line · drag review · Enter review · P reply · X resolve · Esc detail"
-	if m.kind() == provider.Commits {
+	if m.currentDetailKind() == provider.Commits {
 		help = " h/l file · j/k line · Enter comment · Esc detail"
 	}
 	lines = append(lines, metaStyle.Render(truncate(help, m.width)))

@@ -691,6 +691,80 @@ func TestGraphViewStaysWithinNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestGraphPaneWidthsKeepExistingDefaults(t *testing.T) {
+	left, right := graphPaneWidthsAt(118, 0, true)
+	if left != 39 || right != 79 {
+		t.Fatalf("Graph panes with changed files = %d/%d, want 39/79", left, right)
+	}
+	left, right = graphPaneWidthsAt(118, 0, false)
+	if left != 78 || right != 40 {
+		t.Fatalf("Graph panes without changed files = %d/%d, want 78/40", left, right)
+	}
+}
+
+func TestGraphDividerDragUpdatesAndStopsOnRelease(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active, m.width, m.height, m.loadingList = 4, 120, 20, false
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "one", Paths: []string{"main.go"}}}
+	left, _ := m.graphPaneWidths(true)
+
+	updated, cmd := m.Update(tea.MouseMsg{X: left, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd != nil || !m.graphDragging {
+		t.Fatalf("divider press: dragging=%t cmd=%v", m.graphDragging, cmd != nil)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 70, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if left, _ := m.graphPaneWidths(true); left != 70 {
+		t.Fatalf("dragged Commit Graph width = %d, want 70", left)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 70, Y: 9, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	m = updated.(Model)
+	if m.graphDragging {
+		t.Fatal("Graph divider remained active after release")
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 40, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if left, _ := m.graphPaneWidths(true); left != 70 {
+		t.Fatalf("motion after release changed Commit Graph width to %d", left)
+	}
+}
+
+func TestGraphDividerDragClampsAndResizePreservesRatio(t *testing.T) {
+	m := New(fakeProvider{}, 0)
+	m.active, m.width, m.height, m.loadingList = 4, 120, 20, false
+	m.items[provider.Commits] = []provider.Item{{ID: "one", Title: "one", Paths: []string{"main.go"}}}
+	left, _ := m.graphPaneWidths(true)
+	updated, _ := m.Update(tea.MouseMsg{X: left, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{X: -20, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if left, _ := m.graphPaneWidths(true); left != graphPaneMinWidth {
+		t.Fatalf("Commit Graph clamp = %d, want %d", left, graphPaneMinWidth)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 500, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if _, right := m.graphPaneWidths(true); right != graphPaneMinWidth {
+		t.Fatalf("Changed Files clamp = %d, want %d", right, graphPaneMinWidth)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 70, Y: 9, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	ratio := m.graphSplitRatio
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	m = updated.(Model)
+	left, right := m.graphPaneWidths(true)
+	if m.graphDragging || left < graphPaneMinWidth || right < graphPaneMinWidth {
+		t.Fatalf("resize state: dragging=%t left=%d right=%d", m.graphDragging, left, right)
+	}
+	if got := float64(left) / float64(m.width-2); got < ratio-0.02 || got > ratio+0.02 {
+		t.Fatalf("resized Graph ratio = %.3f, want near %.3f", got, ratio)
+	}
+	if left, right := graphPaneWidthsAt(12, ratio, true); left < 1 || right < 1 || left+right != 12 {
+		t.Fatalf("narrow Graph layout left=%d right=%d", left, right)
+	}
+}
+
 func TestGraphKeyboardFileNavigationAndSearchHighlight(t *testing.T) {
 	m := New(fakeProvider{}, 0)
 	m.active = 4

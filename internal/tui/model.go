@@ -98,6 +98,7 @@ type listResultMsg struct {
 
 type detailResultMsg struct {
 	request uint64
+	kind    provider.Kind
 	item    provider.Item
 	detail  provider.Detail
 	err     error
@@ -166,24 +167,31 @@ type Model struct {
 	cursor      map[provider.Kind]int
 	offset      map[provider.Kind]int
 
-	selected         provider.Item
-	detail           provider.Detail
-	viewport         viewport.Model
-	labels           textinput.Model
-	branchInput      textinput.Model
-	branchAction     string
-	branchTarget     provider.Item
-	modal            *modalState
-	lastModalResult  *ModalResult
-	modalError       string
-	comment          textarea.Model
-	fileFilter       textinput.Model
-	graphQuery       textinput.Model // shared Search input for non-workspace tabs
-	commitMessage    textinput.Model
-	graphFilter      textinput.Model
-	graphAuthorScope int // 0 all, 1 mine, 2 others
-	graphDepth       graphNavigationDepth
-	graphFile        int
+	selected             provider.Item
+	detail               provider.Detail
+	detailKind           provider.Kind
+	milestoneParent      provider.Detail
+	hasMilestoneParent   bool
+	milestoneIssueFilter int
+	milestoneIssueCursor int
+	viewport             viewport.Model
+	labels               textinput.Model
+	branchInput          textinput.Model
+	branchAction         string
+	branchTarget         provider.Item
+	modal                *modalState
+	lastModalResult      *ModalResult
+	modalError           string
+	comment              textarea.Model
+	fileFilter           textinput.Model
+	graphQuery           textinput.Model // shared Search input for non-workspace tabs
+	commitMessage        textinput.Model
+	graphFilter          textinput.Model
+	graphAuthorScope     int // 0 all, 1 mine, 2 others
+	graphDepth           graphNavigationDepth
+	graphFile            int
+	graphSplitRatio      float64
+	graphDragging        bool
 
 	workspaceEntries               []worktree.Entry
 	workspaceFile                  worktree.File
@@ -259,6 +267,14 @@ const (
 	graphCommitDepth graphNavigationDepth = iota
 	graphFileDepth
 )
+
+var milestoneIssueFilters = []provider.Filter{
+	{Label: "Open", Value: "open"},
+	{Label: "Assigned to me", Value: "assigned"},
+	{Label: "In progress", Value: "in_progress"},
+	{Label: "Closed", Value: "closed"},
+	{Label: "All", Value: "all"},
+}
 
 // WheelScrollMsg applies coalesced mouse-wheel clicks. A negative delta moves
 // toward the top; a positive delta moves toward the bottom.
@@ -514,6 +530,13 @@ func (m Model) kind() provider.Kind {
 	return activeKinds[index]
 }
 
+func (m Model) currentDetailKind() provider.Kind {
+	if m.hasMilestoneParent {
+		return m.detailKind
+	}
+	return m.kind()
+}
+
 func (m Model) aiUsageActive() bool { return m.active == m.tabCount()-1 }
 
 func (m Model) workspaceKinds() []provider.Kind {
@@ -691,7 +714,7 @@ func (m Model) fetchDetailCmd(request uint64, kind provider.Kind, item provider.
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		detail, err := m.backend.Detail(ctx, kind, item)
-		return detailResultMsg{request: request, item: item, detail: detail, err: err}
+		return detailResultMsg{request: request, kind: kind, item: item, detail: detail, err: err}
 	}
 }
 
@@ -769,13 +792,16 @@ func (m Model) startDetailLoad() (Model, tea.Cmd) {
 	m.detailRequest++
 	m.loadingDetail = true
 	m.err = nil
-	return m, m.fetchDetailCmd(m.detailRequest, m.kind(), m.selected)
+	kind := m.currentDetailKind()
+	m.detailKind = kind
+	return m, m.fetchDetailCmd(m.detailRequest, kind, m.selected)
 }
 
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.graphDragging = false
 		m.workspaceDividerDragging = false
 		m.workspaceCommitDividerDragging = false
 		m.resizeViewport()
@@ -913,7 +939,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case detailResultMsg:
-		if m.localTab() || msg.request != m.detailRequest || msg.item.ID != m.selected.ID || m.screen == listScreen {
+		if m.localTab() || msg.request != m.detailRequest || msg.kind != m.currentDetailKind() || msg.item.ID != m.selected.ID || m.screen == listScreen {
 			return m, nil
 		}
 		m.loadingDetail = false
@@ -1528,8 +1554,55 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	kind := m.currentDetailKind()
+	if kind == provider.Milestones && m.detailReady() {
+		switch msg.String() {
+		case "left", "h":
+			m.changeMilestoneIssueFilter(-1)
+			return m, nil
+		case "right", "l":
+			m.changeMilestoneIssueFilter(1)
+			return m, nil
+		case "up", "k":
+			m.moveMilestoneIssueCursor(-1)
+			return m, nil
+		case "down", "j":
+			m.moveMilestoneIssueCursor(1)
+			return m, nil
+		case "enter":
+			return m.openMilestoneIssue()
+		case "c", "C":
+			if issue, ok := m.currentMilestoneIssue(); ok {
+				return m.startIssueStateAction(issue, false)
+			}
+		case "o", "O":
+			if issue, ok := m.currentMilestoneIssue(); ok {
+				return m.startIssueStateAction(issue, true)
+			}
+		case "a", "A":
+			if issue, ok := m.currentMilestoneIssue(); ok {
+				return m.startAssignmentActionForKind(provider.Issues, issue, true)
+			}
+		case "u", "U":
+			if issue, ok := m.currentMilestoneIssue(); ok {
+				return m.startAssignmentActionForKind(provider.Issues, issue, false)
+			}
+		}
+	}
 	switch msg.String() {
 	case "esc":
+		if m.hasMilestoneParent {
+			m.selected = m.milestoneParent.Item
+			m.detail = m.milestoneParent
+			m.detailKind = provider.Milestones
+			m.milestoneParent = provider.Detail{}
+			m.hasMilestoneParent = false
+			m.loadingDetail = false
+			m.err = nil
+			m.setDetailContent()
+			m.ensureMilestoneIssueVisible()
+			return m.startDetailLoad()
+		}
 		m.screen = listScreen
 		m.detail = provider.Detail{}
 		m.loadingList = false
@@ -1552,55 +1625,55 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadingDetail = false
 		return m.startDetailLoad()
 	case "n", "N":
-		if (m.kind() == provider.PullRequests || m.kind() == provider.Issues || m.kind() == provider.Commits) && m.detailReady() {
+		if (kind == provider.PullRequests || kind == provider.Issues || kind == provider.Commits) && m.detailReady() {
 			return m.openCommentEditor(generalComment)
 		}
 	case "R":
-		if m.kind() == provider.PullRequests && m.detailReady() {
+		if kind == provider.PullRequests && m.detailReady() {
 			return m.openCommentEditor(generalReview)
 		}
-		if m.kind() == provider.CIRuns && m.detailReady() {
+		if kind == provider.CIRuns && m.detailReady() {
 			return m.startRunAction(m.selected, true)
 		}
 	case "d", "D":
-		if diffCommentableKind(m.kind()) && m.detailReady() {
+		if diffCommentableKind(kind) && m.detailReady() {
 			m.screen = diffScreen
 			m.clampDiffSelection()
 			m.setDiffContent()
 			return m, nil
 		}
 	case "m", "M":
-		if m.kind() == provider.PullRequests && m.detailReady() && m.selected.HeadSHA != "" && !m.actionBusy {
+		if kind == provider.PullRequests && m.detailReady() && m.selected.HeadSHA != "" && !m.actionBusy {
 			m.actionBusy = true
 			m.status = "merging…"
 			item := m.selected
 			return m, m.actionCmd("merge", func(ctx context.Context) error { return m.backend.Merge(ctx, item) })
 		}
 	case "c", "C":
-		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
+		if kind == provider.Issues && m.detailReady() && !m.actionBusy {
 			return m.startIssueStateAction(m.selected, false)
 		}
 	case "o", "O":
-		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
+		if kind == provider.Issues && m.detailReady() && !m.actionBusy {
 			return m.startIssueStateAction(m.selected, true)
 		}
 	case "a", "A":
-		if assignableKind(m.kind()) && m.detailReady() {
+		if assignableKind(kind) && m.detailReady() {
 			return m.startAssignmentAction(m.selected, true)
 		}
 	case "u", "U":
-		if assignableKind(m.kind()) && m.detailReady() {
+		if assignableKind(kind) && m.detailReady() {
 			return m.startAssignmentAction(m.selected, false)
 		}
 	case "l", "L":
-		if m.kind() == provider.Issues && m.detailReady() && !m.actionBusy {
+		if kind == provider.Issues && m.detailReady() && !m.actionBusy {
 			m.screen = labelScreen
 			m.labels.SetValue(strings.Join(m.detail.Labels, ", "))
 			m.labels.CursorEnd()
 			return m, m.labels.Focus()
 		}
 	case "x", "X":
-		if m.kind() == provider.CIRuns && m.detailReady() {
+		if kind == provider.CIRuns && m.detailReady() {
 			return m.startRunAction(m.selected, false)
 		}
 	}
@@ -1635,7 +1708,7 @@ func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveDiffLine(1)
 	case "v", "V":
-		if m.kind() == provider.Commits {
+		if m.currentDetailKind() == provider.Commits {
 			m.diffAnchor = -1
 			m.status = "commit comments support one diff line"
 			m.setDiffContent()
@@ -1691,6 +1764,87 @@ func (m Model) currentListItem() (provider.Item, bool) {
 	return items[index], true
 }
 
+func (m Model) filteredMilestoneIssues() []provider.Item {
+	if len(m.detail.Issues) == 0 {
+		return nil
+	}
+	index := min(max(0, m.milestoneIssueFilter), len(milestoneIssueFilters)-1)
+	filter := milestoneIssueFilters[index].Value
+	items := make([]provider.Item, 0, len(m.detail.Issues))
+	for _, issue := range m.detail.Issues {
+		open := issue.State == "open" || issue.State == "opened"
+		matches := false
+		switch filter {
+		case "open":
+			matches = open
+		case "assigned":
+			matches = open && issue.AssignedToMe
+		case "in_progress":
+			matches = open && len(issue.Assignees) > 0
+		case "closed":
+			matches = !open
+		case "all":
+			matches = true
+		}
+		if matches {
+			items = append(items, issue)
+		}
+	}
+	return items
+}
+
+func (m *Model) clampMilestoneIssueCursor() {
+	items := m.filteredMilestoneIssues()
+	if len(items) == 0 {
+		m.milestoneIssueCursor = 0
+		return
+	}
+	m.milestoneIssueCursor = min(max(0, m.milestoneIssueCursor), len(items)-1)
+}
+
+func (m *Model) changeMilestoneIssueFilter(delta int) {
+	count := len(milestoneIssueFilters)
+	m.milestoneIssueFilter = (m.milestoneIssueFilter + delta + count) % count
+	m.milestoneIssueCursor = 0
+	m.setDetailContent()
+	m.ensureMilestoneIssueVisible()
+}
+
+func (m *Model) moveMilestoneIssueCursor(delta int) {
+	items := m.filteredMilestoneIssues()
+	if len(items) == 0 {
+		return
+	}
+	m.milestoneIssueCursor = min(max(0, m.milestoneIssueCursor+delta), len(items)-1)
+	m.setDetailContent()
+	m.ensureMilestoneIssueVisible()
+}
+
+func (m Model) currentMilestoneIssue() (provider.Item, bool) {
+	items := m.filteredMilestoneIssues()
+	if m.milestoneIssueCursor < 0 || m.milestoneIssueCursor >= len(items) {
+		return provider.Item{}, false
+	}
+	return items[m.milestoneIssueCursor], true
+}
+
+func (m Model) openMilestoneIssue() (tea.Model, tea.Cmd) {
+	issue, ok := m.currentMilestoneIssue()
+	if !ok {
+		return m, nil
+	}
+	m.milestoneParent = m.detail
+	m.hasMilestoneParent = true
+	m.selected = issue
+	m.detail = provider.Detail{}
+	m.detailKind = provider.Issues
+	m.viewport.SetContent("")
+	m.viewport.GotoTop()
+	m.loadingDetail = false
+	m.err = nil
+	return m.startDetailLoad()
+}
+
 func (m Model) startIssueStateAction(item provider.Item, open bool) (tea.Model, tea.Cmd) {
 	if m.actionBusy {
 		return m, nil
@@ -1708,6 +1862,14 @@ func (m Model) startIssueStateAction(item provider.Item, open bool) (tea.Model, 
 }
 
 func (m Model) startAssignmentAction(item provider.Item, assigned bool) (tea.Model, tea.Cmd) {
+	kind := m.kind()
+	if m.screen != listScreen {
+		kind = m.currentDetailKind()
+	}
+	return m.startAssignmentActionForKind(kind, item, assigned)
+}
+
+func (m Model) startAssignmentActionForKind(kind provider.Kind, item provider.Item, assigned bool) (tea.Model, tea.Cmd) {
 	if m.actionBusy {
 		return m, nil
 	}
@@ -1718,7 +1880,6 @@ func (m Model) startAssignmentAction(item provider.Item, assigned bool) (tea.Mod
 		action = "unassign from me"
 		m.status = "removing your assignment…"
 	}
-	kind := m.kind()
 	return m, m.actionCmd(action, func(ctx context.Context) error {
 		return m.backend.SetAssigned(ctx, kind, item, assigned)
 	})
@@ -1763,7 +1924,7 @@ func (m Model) updateLabelInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) openCommentEditor(mode commentMode) (tea.Model, tea.Cmd) {
 	m.commentOrigin = m.screen
 	m.commentItem = m.selected
-	m.commentKind = m.kind()
+	m.commentKind = m.currentDetailKind()
 	m.commentTarget = provider.ReviewTarget{}
 	m.commentTargetSet = false
 	m.commentThread = provider.ReviewThreadTarget{}
@@ -1773,7 +1934,7 @@ func (m Model) openCommentEditor(mode commentMode) (tea.Model, tea.Cmd) {
 			m.status = err.Error()
 			return m, nil
 		}
-		if m.kind() == provider.Commits && target.IsRange() {
+		if m.currentDetailKind() == provider.Commits && target.IsRange() {
 			m.status = "commit comments support one diff line"
 			return m, nil
 		}
@@ -1797,7 +1958,7 @@ func (m Model) openReplyEditor(review provider.DiffReview) (tea.Model, tea.Cmd) 
 	m.commentOrigin = m.screen
 	m.commentMode = reviewReply
 	m.commentItem = m.selected
-	m.commentKind = m.kind()
+	m.commentKind = m.currentDetailKind()
 	m.commentTarget = provider.ReviewTarget{}
 	m.commentTargetSet = false
 	m.commentThread = provider.ReviewThreadTarget{ThreadID: review.ThreadID, ReplyToID: review.ReplyToID}
@@ -1917,6 +2078,10 @@ func (m Model) openSelected() (tea.Model, tea.Cmd) {
 	}
 	m.selected = items[index]
 	m.detail = provider.Detail{}
+	m.detailKind = m.kind()
+	m.milestoneParent = provider.Detail{}
+	m.hasMilestoneParent = false
+	m.milestoneIssueFilter, m.milestoneIssueCursor = 0, 0
 	m.viewport.SetContent("")
 	m.diffFile, m.diffLine, m.diffAnchor = 0, -1, -1
 	m.screen = detailScreen
@@ -2008,10 +2173,27 @@ func (m *Model) setDetailContent() {
 		selectedLine, anchor = m.diffLine, m.diffAnchor
 	}
 	content, _ := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, selectedLine, anchor, m.selectedReview)
-	if diffCommentableKind(m.kind()) && len(m.detail.Diffs) == 0 {
+	if m.currentDetailKind() == provider.Milestones {
+		m.clampMilestoneIssueCursor()
+		content += "\n" + m.milestoneIssuesPanel()
+	}
+	if diffCommentableKind(m.currentDetailKind()) && len(m.detail.Diffs) == 0 {
 		content += "\n" + detailBoxStyle.Width(max(12, m.viewport.Width-2)).Render(sectionTitleStyle.Render("Diff")+"\n"+metaStyle.Render("No patch was provided for this change."))
 	}
 	m.viewport.SetContent(content)
+}
+
+func (m *Model) ensureMilestoneIssueVisible() {
+	if m.currentDetailKind() != provider.Milestones {
+		return
+	}
+	base, _ := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, -1, -1, m.selectedReview)
+	target := lipgloss.Height(base) + 2 + m.milestoneIssueCursor
+	if target < m.viewport.YOffset {
+		m.viewport.SetYOffset(target)
+	} else if target >= m.viewport.YOffset+m.viewport.Height {
+		m.viewport.SetYOffset(max(0, target-m.viewport.Height+1))
+	}
 }
 
 func (m *Model) clampDiffSelection() {
@@ -2214,7 +2396,7 @@ func (m Model) diffHitAtMouse(x, y int) (diffHitRegion, bool) {
 
 func (m Model) detailDiffHitAtMouse(x, y int) (diffHitRegion, bool) {
 	const viewportTop = 2
-	if !diffCommentableKind(m.kind()) || y < viewportTop || y >= viewportTop+m.viewport.Height {
+	if !diffCommentableKind(m.currentDetailKind()) || y < viewportTop || y >= viewportTop+m.viewport.Height {
 		return diffHitRegion{}, false
 	}
 	contentRow := m.viewport.YOffset + y - viewportTop
@@ -2473,6 +2655,22 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.graphDragging {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			m.graphDragging = false
+			return m, nil
+		case tea.MouseActionMotion:
+			total := max(2, m.width-2)
+			dragRatio := max(1.0/float64(total), float64(msg.X)/float64(total))
+			left, _ := graphPaneWidthsAt(total, dragRatio, m.graphHasChangedFiles())
+			m.graphSplitRatio = float64(left) / float64(total)
+			return m, nil
+		case tea.MouseActionPress:
+			// Recover if a terminal failed to deliver the prior release.
+			m.graphDragging = false
+		}
+	}
 	if m.actionBusy {
 		return m, nil
 	}
@@ -2489,6 +2687,21 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.Y == 4 && msg.X > 0 && msg.X < m.width-1 {
 		focused, cmd := m.focusActiveFilter()
 		return focused, cmd
+	}
+	if m.screen == listScreen && !m.localTab() && m.kind() == provider.Commits && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		leftWidth, _ := m.graphPaneWidths(m.graphHasChangedFiles())
+		panelHeight := m.listHeight() + 2
+		panelTop := 8
+		if m.remoteErr != nil {
+			panelTop = 6
+			if m.localErr != nil {
+				panelTop++
+			}
+		}
+		if msg.Y >= panelTop && msg.Y < panelTop+panelHeight && msg.X >= leftWidth && msg.X <= leftWidth+1 {
+			m.graphDragging = true
+			return m, nil
+		}
 	}
 	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && !m.workspaceCommitActive() {
 		m = m.blurInteractiveInputs()
@@ -2653,6 +2866,25 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.screen == detailScreen && m.currentDetailKind() == provider.Milestones && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		base, _ := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, -1, -1, m.selectedReview)
+		contentRow := m.viewport.YOffset + msg.Y - 2
+		panelTop := lipgloss.Height(base)
+		if contentRow == panelTop+1 {
+			if filter := milestoneIssueFilterAt(msg.X); filter >= 0 {
+				m.milestoneIssueFilter = filter
+				m.milestoneIssueCursor = 0
+				m.setDetailContent()
+				m.ensureMilestoneIssueVisible()
+			}
+			return m, nil
+		}
+		index := contentRow - panelTop - 2
+		if items := m.filteredMilestoneIssues(); index >= 0 && index < len(items) {
+			m.milestoneIssueCursor = index
+			return m.openMilestoneIssue()
+		}
+	}
 	if m.screen == diffScreen {
 		switch msg.Action {
 		case tea.MouseActionRelease:
@@ -2728,7 +2960,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	if m.screen == detailScreen && diffCommentableKind(m.kind()) {
+	if m.screen == detailScreen && diffCommentableKind(m.currentDetailKind()) {
 		switch msg.Action {
 		case tea.MouseActionRelease:
 			if !m.diffDragging {
@@ -2990,6 +3222,19 @@ func (m Model) filterAt(x int) int {
 	position := 1
 	for index, labelText := range labels {
 		label := " " + labelText + " "
+		end := position + lipgloss.Width(label)
+		if x >= position && x < end {
+			return index
+		}
+		position = end + 1
+	}
+	return -1
+}
+
+func milestoneIssueFilterAt(x int) int {
+	position := 2 // Panel border and the filter row's leading space.
+	for index, filter := range milestoneIssueFilters {
+		label := " " + filter.Label + " "
 		end := position + lipgloss.Width(label)
 		if x >= position && x < end {
 			return index

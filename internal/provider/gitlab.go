@@ -438,7 +438,11 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 		if raw.DueDate != "" {
 			body += "\n\nDue: **" + raw.DueDate + "**"
 		}
-		return Detail{Item: current, Body: body}, nil
+		issues, err := g.gitlabMilestoneIssues(ctx, item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		return Detail{Item: current, Body: body, Issues: issues}, nil
 
 	case Branches:
 		data, err := g.api(ctx, "GET", base+"/repository/branches/"+url.PathEscape(item.ID))
@@ -556,6 +560,30 @@ func (g *GitLab) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 	default:
 		return Detail{}, fmt.Errorf("unsupported GitLab detail kind: %s", kind)
 	}
+}
+
+func (g *GitLab) gitlabMilestoneIssues(ctx context.Context, milestone string) ([]Item, error) {
+	endpoint := "projects/" + g.project + "/milestones/" + url.PathEscape(milestone) + "/issues?per_page=100"
+	data, err := g.api(ctx, "GET", endpoint)
+	if err != nil {
+		return nil, err
+	}
+	var raw []gitlabItem
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode GitLab milestone issues: %w", err)
+	}
+	current, err := g.currentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Item, 0, len(raw))
+	for _, entry := range raw {
+		issue := gitlabListItem(entry)
+		issue.Meta = fmt.Sprintf("#%d · %s", entry.IID, issue.Author)
+		issue.AssignedToMe = hasAssignee(issue.Assignees, current)
+		items = append(items, issue)
+	}
+	return items, nil
 }
 
 func (g *GitLab) gitlabCommitComments(ctx context.Context, sha string) ([]gitlabCommitComment, error) {

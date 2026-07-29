@@ -529,7 +529,11 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 			return Detail{}, fmt.Errorf("decode GitHub milestone: %w", err)
 		}
 		current := Item{ID: item.ID, Title: raw.Title, State: raw.State, Author: raw.Creator.Login, UpdatedAt: parseTime(raw.UpdatedAt), Meta: fmt.Sprintf("%d open / %d closed", raw.OpenIssues, raw.ClosedIssues), URL: raw.HTMLURL}
-		return Detail{Item: current, Body: raw.Description}, nil
+		issues, err := g.githubMilestoneIssues(ctx, item.ID)
+		if err != nil {
+			return Detail{}, err
+		}
+		return Detail{Item: current, Body: raw.Description, Issues: issues}, nil
 
 	case Branches:
 		data, err := g.api(ctx, "GET", "repos/"+g.repo+"/branches/"+url.PathEscape(item.ID))
@@ -656,6 +660,31 @@ func (g *GitHub) Detail(ctx context.Context, kind Kind, item Item) (Detail, erro
 	default:
 		return Detail{}, fmt.Errorf("unsupported GitHub detail kind: %s", kind)
 	}
+}
+
+func (g *GitHub) githubMilestoneIssues(ctx context.Context, milestone string) ([]Item, error) {
+	data, err := g.api(ctx, "GET", "repos/"+g.repo+"/issues", "milestone="+milestone, "state=all", "per_page=100", "sort=updated", "direction=desc")
+	if err != nil {
+		return nil, err
+	}
+	var raw []githubItem
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("decode GitHub milestone issues: %w", err)
+	}
+	current, err := g.currentUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Item, 0, len(raw))
+	for _, entry := range raw {
+		if entry.PullRequest != nil {
+			continue
+		}
+		issue := githubListItem(entry)
+		issue.AssignedToMe = hasAssignee(issue.Assignees, current)
+		items = append(items, issue)
+	}
+	return items, nil
 }
 
 func githubLogSections(data []byte) ([]Section, error) {
