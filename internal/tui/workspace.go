@@ -274,6 +274,7 @@ func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
 		poll = workspacePollTickCmd(m.workspacePollGeneration)
 	}
 	if m.aiUsageActive() {
+		m.aiUsageScrollOffset = 0
 		m.aiUsageLimitsLoading = true
 		m.aiUsageActivityLoading = true
 		return m, tea.Batch(tea.ClearScreen, loadAIUsageCmds(), aiUsageTickCmd(), poll)

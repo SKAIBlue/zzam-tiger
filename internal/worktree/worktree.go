@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -91,11 +92,12 @@ type Status struct {
 
 // Diff contains both sides and Git's patch text for a selected path.
 type Diff struct {
-	Path   string
-	Old    []byte
-	New    []byte
-	Binary bool
-	Patch  string
+	Path      string
+	Old       []byte
+	New       []byte
+	Binary    bool
+	Submodule bool
+	Patch     string
 }
 
 // Ref identifies a branch or tag pointing at a commit.
@@ -282,7 +284,7 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	// optional stat-cache refresh from rewriting the index and feeding the
 	// resulting event back into another status scan.
 	out, err := c.runner.Run(ctx, "git", "--no-optional-locks", "-C", c.root,
-		"status", "--porcelain=v1", "-z", "--untracked-files=all")
+		"status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return Status{}, err
 	}
@@ -617,6 +619,17 @@ func (c *Client) RevertPath(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
+	indexedSubmodules, err := c.indexSubmodules(ctx, clean)
+	if err != nil {
+		return err
+	}
+	newSubmodule := false
+	for _, change := range status.Staged {
+		if change.Path == clean && change.Code == 'A' && slices.Contains(indexedSubmodules, clean) {
+			newSubmodule = true
+			break
+		}
+	}
 	contains := func(candidate string) bool {
 		return candidate == clean || strings.HasPrefix(candidate, clean+"/")
 	}
@@ -652,9 +665,55 @@ func (c *Client) RevertPath(ctx context.Context, path string) error {
 				return err
 			}
 		}
+		submodules, err := c.indexSubmodules(ctx, clean)
+		if err != nil {
+			return err
+		}
+		for _, submodule := range submodules {
+			if _, err := c.git(ctx, "submodule", "update", "--init", "--checkout", "--force", "--", submodule); err != nil {
+				return err
+			}
+			abs, _, err := c.resolve(submodule)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(abs); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			if _, err := c.runner.Run(ctx, "git", "-C", abs, "clean", "-f", "-d"); err != nil {
+				return err
+			}
+		}
 	}
-	_, err = c.git(ctx, "clean", "-f", "-d", "--", clean)
+	cleanArgs := []string{"clean", "-f", "-d"}
+	if newSubmodule {
+		// Git requires a second force flag before it will remove an untracked
+		// repository created by reverting a newly added gitlink.
+		cleanArgs = append(cleanArgs, "-f")
+	}
+	cleanArgs = append(cleanArgs, "--", clean)
+	_, err = c.git(ctx, cleanArgs...)
 	return err
+}
+
+func (c *Client) indexSubmodules(ctx context.Context, path string) ([]string, error) {
+	out, err := c.git(ctx, "ls-files", "--stage", "-z", "--", path)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, entry := range splitNUL(out) {
+		tab := strings.IndexByte(entry, '\t')
+		if tab < 0 || !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		if submodule := entry[tab+1:]; submodule != "" {
+			paths = append(paths, submodule)
+		}
+	}
+	return paths, nil
 }
 
 // Commit creates a commit from the current index using message.
@@ -686,6 +745,23 @@ func (c *Client) Diff(ctx context.Context, path string, staged bool) (Diff, erro
 		return Diff{}, fmt.Errorf("%s has unresolved merge conflicts", clean)
 	}
 	renamedFrom := change.OldPath
+	args := []string{"diff", "--binary", "--submodule=short", "--ignore-submodules=none"}
+	if staged {
+		args = append(args, "--cached")
+	}
+	args = append(args, "--")
+	if renamedFrom != "" {
+		args = append(args, renamedFrom)
+	}
+	args = append(args, clean)
+	patch, err := c.git(ctx, args...)
+	if err != nil {
+		return Diff{}, err
+	}
+	if isSubmodulePatch(patch) {
+		old, new := submoduleDiffSides(patch)
+		return Diff{Path: clean, Old: old, New: new, Submodule: true, Patch: string(patch)}, nil
+	}
 	var old, new []byte
 	if staged {
 		if change.Code != 'A' || renamedFrom != "" {
@@ -729,23 +805,38 @@ func (c *Client) Diff(ctx context.Context, path string, staged bool) (Diff, erro
 			}
 		}
 	}
-	args := []string{"diff", "--binary"}
-	if staged {
-		args = append(args, "--cached")
-	}
-	args = append(args, "--")
-	if renamedFrom != "" {
-		args = append(args, renamedFrom)
-	}
-	args = append(args, clean)
-	patch, err := c.git(ctx, args...)
-	if err != nil {
-		return Diff{}, err
-	}
 	if len(patch) == 0 && !staged && len(old) == 0 && !isBinary(new) {
 		patch = untrackedPatch(clean, new)
 	}
 	return Diff{Path: clean, Old: old, New: new, Binary: isBinary(old) || isBinary(new), Patch: string(patch)}, nil
+}
+
+func isSubmodulePatch(patch []byte) bool {
+	oldCommit, newCommit := false, false
+	for _, line := range bytes.Split(patch, []byte{'\n'}) {
+		if bytes.Equal(line, []byte("new file mode 160000")) ||
+			bytes.Equal(line, []byte("deleted file mode 160000")) ||
+			bytes.Equal(line, []byte("old mode 160000")) ||
+			bytes.Equal(line, []byte("new mode 160000")) ||
+			bytes.HasSuffix(line, []byte(" 160000")) && bytes.HasPrefix(line, []byte("index ")) {
+			return true
+		}
+		oldCommit = oldCommit || bytes.HasPrefix(line, []byte("-Subproject commit "))
+		newCommit = newCommit || bytes.HasPrefix(line, []byte("+Subproject commit "))
+	}
+	return oldCommit && newCommit
+}
+
+func submoduleDiffSides(patch []byte) (old, new []byte) {
+	for _, line := range bytes.Split(patch, []byte{'\n'}) {
+		switch {
+		case bytes.HasPrefix(line, []byte("-Subproject commit ")):
+			old = append(append(old[:0], line[1:]...), '\n')
+		case bytes.HasPrefix(line, []byte("+Subproject commit ")):
+			new = append(append(new[:0], line[1:]...), '\n')
+		}
+	}
+	return old, new
 }
 
 func statusChange(status Status, path string, staged bool) (Change, bool) {

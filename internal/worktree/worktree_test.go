@@ -47,7 +47,7 @@ func TestStatusDisablesOptionalGitIndexWrites(t *testing.T) {
 	if _, err := client.Status(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"git", "--no-optional-locks", "-C", client.Root(), "status", "--porcelain=v1", "-z", "--untracked-files=all"}
+	want := []string{"git", "--no-optional-locks", "-C", client.Root(), "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"}
 	if len(runner.calls) != 2 || !slices.Equal(runner.calls[1], want) {
 		t.Fatalf("Status command = %#v, want %#v", runner.calls, want)
 	}
@@ -215,6 +215,191 @@ func TestStatusStageUnstageAndDiff(t *testing.T) {
 	}
 	if len(untracked.Old) != 0 || string(untracked.New) != "untracked\n" || !strings.Contains(untracked.Patch, "+untracked") {
 		t.Errorf("untracked Diff = %#v", untracked)
+	}
+}
+
+func TestSubmoduleStatusStageUnstageAndDiff(t *testing.T) {
+	repo, source := newRepoWithSubmodule(t, "modules/lib")
+	writeFile(t, source, "value.txt", []byte("updated\n"))
+	git(t, source, "commit", "-am", "update submodule")
+	updatedSHA := strings.TrimSpace(string(git(t, source, "rev-parse", "HEAD")))
+	git(t, filepath.Join(repo, "modules/lib"), "fetch", "-q", "origin")
+	git(t, filepath.Join(repo, "modules/lib"), "checkout", "-q", updatedSHA)
+
+	client := New(repo, provider.ExecRunner{})
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChange(t, status.Unstaged, "modules/lib", "", 'M')
+
+	unstaged, err := client.Diff(context.Background(), "modules/lib", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !unstaged.Submodule || !strings.Contains(unstaged.Patch, "+Subproject commit "+updatedSHA) ||
+		!strings.Contains(string(unstaged.New), "Subproject commit "+updatedSHA) {
+		t.Fatalf("unstaged submodule Diff = %#v", unstaged)
+	}
+
+	if err := client.Stage(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChange(t, status.Staged, "modules/lib", "", 'M')
+	staged, err := client.Diff(context.Background(), "modules/lib", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !staged.Submodule || !strings.Contains(staged.Patch, "+Subproject commit "+updatedSHA) {
+		t.Fatalf("staged submodule Diff = %#v", staged)
+	}
+
+	if err := client.Unstage(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged) != 0 {
+		t.Fatalf("staged submodule remained after Unstage: %#v", status)
+	}
+	assertChange(t, status.Unstaged, "modules/lib", "", 'M')
+}
+
+func TestDiffShowsDirtySubmoduleAtItsRecordedCommit(t *testing.T) {
+	repo, _ := newRepoWithSubmodule(t, "modules/lib")
+	git(t, repo, "config", "submodule.modules/lib.ignore", "all")
+	writeFile(t, repo, "modules/lib/value.txt", []byte("dirty\n"))
+
+	client := New(repo, provider.ExecRunner{})
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertChange(t, status.Unstaged, "modules/lib", "", 'M')
+	diff, err := client.Diff(context.Background(), "modules/lib", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Submodule || !strings.Contains(diff.Patch, "-dirty") || !strings.Contains(string(diff.New), "-dirty") {
+		t.Fatalf("dirty submodule Diff = %#v", diff)
+	}
+}
+
+func TestRevertPathResetsSubmoduleCommitAndContents(t *testing.T) {
+	repo, source := newRepoWithSubmodule(t, "modules/lib")
+	recordedSHA := strings.TrimSpace(string(git(t, repo, "rev-parse", "HEAD:modules/lib")))
+	writeFile(t, source, "value.txt", []byte("updated\n"))
+	git(t, source, "commit", "-am", "update submodule")
+	updatedSHA := strings.TrimSpace(string(git(t, source, "rev-parse", "HEAD")))
+	submodule := filepath.Join(repo, "modules/lib")
+	git(t, submodule, "fetch", "-q", "origin")
+	git(t, submodule, "checkout", "-q", updatedSHA)
+	writeFile(t, repo, "modules/lib/value.txt", []byte("dirty\n"))
+	writeFile(t, repo, "modules/lib/untracked.txt", []byte("remove me\n"))
+
+	client := New(repo, provider.ExecRunner{})
+	if err := client.Stage(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RevertPath(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged)+len(status.Unstaged)+len(status.Untracked) != 0 {
+		t.Fatalf("submodule remained changed after revert: %#v", status)
+	}
+	if got := strings.TrimSpace(string(git(t, submodule, "rev-parse", "HEAD"))); got != recordedSHA {
+		t.Fatalf("submodule HEAD after revert = %s, want %s", got, recordedSHA)
+	}
+	if data, err := os.ReadFile(filepath.Join(submodule, "value.txt")); err != nil || string(data) != "initial\n" {
+		t.Fatalf("submodule tracked file after revert = %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(submodule, "untracked.txt")); !os.IsNotExist(err) {
+		t.Fatalf("submodule untracked file remains after revert: %v", err)
+	}
+}
+
+func TestRevertPathRemovesNewSubmoduleWorktree(t *testing.T) {
+	source := newRepo(t)
+	writeFile(t, source, "value.txt", []byte("initial\n"))
+	git(t, source, "add", "value.txt")
+	git(t, source, "commit", "-m", "initial submodule")
+	repo := newRepo(t)
+	writeFile(t, repo, "README.md", []byte("root\n"))
+	git(t, repo, "add", "README.md")
+	git(t, repo, "commit", "-m", "initial parent")
+	git(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, "modules/lib")
+
+	client := New(repo, provider.ExecRunner{})
+	diff, err := client.Diff(context.Background(), "modules/lib", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Submodule || len(diff.Old) != 0 || !strings.Contains(string(diff.New), "Subproject commit ") {
+		t.Fatalf("new submodule Diff = %#v", diff)
+	}
+	if err := client.RevertPath(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range [][]Change{status.Staged, status.Unstaged, status.Untracked} {
+		for _, change := range group {
+			if change.Path == "modules/lib" || strings.HasPrefix(change.Path, "modules/lib/") {
+				t.Fatalf("new submodule remained after revert: %#v", status)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(repo, "modules/lib")); !os.IsNotExist(err) {
+		t.Fatalf("new submodule worktree remains after revert: %v", err)
+	}
+}
+
+func TestDeletedSubmoduleDiffAndRevert(t *testing.T) {
+	repo, _ := newRepoWithSubmodule(t, "modules/lib")
+	recordedSHA := strings.TrimSpace(string(git(t, repo, "rev-parse", "HEAD:modules/lib")))
+	git(t, repo, "rm", "-q", "-f", "modules/lib")
+
+	client := New(repo, provider.ExecRunner{})
+	diff, err := client.Diff(context.Background(), "modules/lib", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !diff.Submodule || !strings.Contains(string(diff.Old), "Subproject commit "+recordedSHA) || len(diff.New) != 0 {
+		t.Fatalf("deleted submodule Diff = %#v", diff)
+	}
+	// git rm stages the matching .gitmodules edit separately. Restore that
+	// metadata before restoring the gitlink, just as the Commit tab presents it.
+	if err := client.RevertPath(context.Background(), ".gitmodules"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RevertPath(context.Background(), "modules/lib"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range [][]Change{status.Staged, status.Unstaged, status.Untracked} {
+		for _, change := range group {
+			if change.Path == "modules/lib" || strings.HasPrefix(change.Path, "modules/lib/") {
+				t.Fatalf("deleted submodule remained changed after revert: %#v", status)
+			}
+		}
+	}
+	if got := strings.TrimSpace(string(git(t, filepath.Join(repo, "modules/lib"), "rev-parse", "HEAD"))); got != recordedSHA {
+		t.Fatalf("restored submodule HEAD = %s, want %s", got, recordedSHA)
 	}
 }
 
@@ -670,6 +855,19 @@ func newRepo(t *testing.T) string {
 	git(t, repo, "config", "user.name", "Test User")
 	git(t, repo, "config", "user.email", "test@example.com")
 	return repo
+}
+
+func newRepoWithSubmodule(t *testing.T, path string) (repo, source string) {
+	t.Helper()
+	source = newRepo(t)
+	writeFile(t, source, "value.txt", []byte("initial\n"))
+	git(t, source, "add", "value.txt")
+	git(t, source, "commit", "-m", "initial submodule")
+
+	repo = newRepo(t)
+	git(t, repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", source, path)
+	git(t, repo, "commit", "-m", "add submodule")
+	return repo, source
 }
 
 func writeFile(t *testing.T, repo, path string, data []byte) {

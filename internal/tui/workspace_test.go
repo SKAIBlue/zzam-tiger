@@ -336,9 +336,24 @@ func TestAIUsageShowsLimitsWhileActivityIsCollecting(t *testing.T) {
 		Limits:       []aiusage.Limit{{Label: "5 hours", Used: 21}},
 	}}
 	view := ansi.Strip(m.aiUsageView())
-	for _, want := range []string{"21.0%", "Collecting…", "Collecting activity…"} {
+	for _, want := range []string{"Remaining  79.0%", "Collecting…", "Collecting activity…"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("AI Usage view does not contain %q while activity loads:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "Remaining  21.0%") {
+		t.Fatalf("AI Usage view shows used usage instead of remaining usage:\n%s", view)
+	}
+}
+
+func TestRemainingUsagePercentIsClamped(t *testing.T) {
+	tests := []struct {
+		used float64
+		want float64
+	}{{21, 79}, {-5, 100}, {105, 0}}
+	for _, test := range tests {
+		if got := remainingUsagePercent(test.used); got != test.want {
+			t.Errorf("remainingUsagePercent(%v) = %v, want %v", test.used, got, test.want)
 		}
 	}
 }
@@ -374,6 +389,69 @@ func TestAIUsageShowsModelTokenBreakdownBelowTotal(t *testing.T) {
 	}
 	if !strings.Contains(view, "This month 750") {
 		t.Fatalf("AI Usage view is missing monthly total tokens:\n%s", view)
+	}
+}
+
+func TestAIUsageScrollsWithKeyboardAndMouseWheel(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = m.tabCount() - 1
+	m.width, m.height = 100, 12
+	m.aiUsage = []aiusage.Provider{{
+		Name: aiusage.CodexName, TotalTokens: 1750, MonthlyTokens: 750, ActivityLoaded: true, LimitsLoaded: true,
+		Models: []aiusage.ModelUsage{
+			{Model: "gpt-5.5", Input: 1500, Cached: 1000, Output: 250},
+			{Model: "gpt-5.6-sol", Input: 300, Cached: 200, Output: 100},
+		},
+		Limits:  []aiusage.Limit{{Label: "5 hours", Used: 21}, {Label: "Weekly", Used: 42}},
+		Updated: time.Date(2026, 7, 29, 12, 34, 0, 0, time.Local),
+	}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.aiUsageScrollOffset != 1 {
+		t.Fatalf("AI Usage down offset = %d, want 1", m.aiUsageScrollOffset)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+	if m.aiUsageScrollOffset != m.aiUsageMaxScrollOffset() || m.aiUsageScrollOffset == 0 {
+		t.Fatalf("AI Usage end offset = %d, max = %d", m.aiUsageScrollOffset, m.aiUsageMaxScrollOffset())
+	}
+	if view := ansi.Strip(m.aiUsageView()); !strings.Contains(view, "Updated     2026-07-29 12:34") {
+		t.Fatalf("AI Usage end view does not show final row:\n%s", view)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(Model)
+	if m.aiUsageScrollOffset != 0 {
+		t.Fatalf("AI Usage home offset = %d, want 0", m.aiUsageScrollOffset)
+	}
+
+	updated, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress, X: 10, Y: 6})
+	m = updated.(Model)
+	if m.aiUsageScrollOffset != 3 {
+		t.Fatalf("AI Usage wheel offset = %d, want 3", m.aiUsageScrollOffset)
+	}
+}
+
+func TestAIUsageKeepsHeaderAndTabTopBorderVisible(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = m.tabCount() - 1
+	m.width, m.height = 100, 12
+	m.aiUsage = []aiusage.Provider{{
+		Name: aiusage.CodexName, ActivityLoaded: true, LimitsLoaded: true,
+		Models: []aiusage.ModelUsage{{Model: "gpt-5.6-sol", Input: 300, Cached: 200, Output: 100}},
+	}}
+
+	lines := strings.Split(ansi.Strip(m.aiUsageView()), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("AI Usage view height = %d, want %d:\n%s", len(lines), m.height, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[0], "Zzam Tiger") {
+		t.Fatalf("AI Usage header is missing from first row: %q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "╭") {
+		t.Fatalf("AI Usage tab top border is missing from second row: %q", lines[1])
 	}
 }
 
@@ -2291,6 +2369,19 @@ func TestWorkspaceDiffUsesSharedProviderRenderer(t *testing.T) {
 	remote := renderDiffFile([]provider.DiffFile{file}, 0, -1, -1, width)
 	if workspace != remote {
 		t.Fatalf("Commit tab diff diverged from shared PR/MR renderer:\nworkspace=%q\nremote=%q", workspace, remote)
+	}
+}
+
+func TestWorkspaceDiffRendersSubmoduleCommitChange(t *testing.T) {
+	diff := worktree.Diff{
+		Path:      "modules/lib",
+		Submodule: true,
+		Patch:     "diff --git a/modules/lib b/modules/lib\nindex 1111111..2222222 160000\n--- a/modules/lib\n+++ b/modules/lib\n@@ -1 +1 @@\n-Subproject commit 1111111111111111111111111111111111111111\n+Subproject commit 2222222222222222222222222222222222222222-dirty\n",
+	}
+	plain := ansi.Strip(renderWorkspaceDiff(diff, 80))
+	if !strings.Contains(plain, "modules/lib") || !strings.Contains(plain, "-Subproject commit 1111111") ||
+		!strings.Contains(plain, "+Subproject commit 2222222") || !strings.Contains(plain, "-dirty") {
+		t.Fatalf("submodule diff was not rendered as a gitlink change: %q", plain)
 	}
 }
 

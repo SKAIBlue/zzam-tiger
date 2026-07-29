@@ -195,7 +195,21 @@ func (m Model) listView() string {
 
 func (m Model) aiUsageView() string {
 	lines := []string{m.headerView("  AI Usage"), m.tabsView()}
-	contentStart := len(lines)
+	rows := m.aiUsageRows()
+	visibleHeight := m.aiUsageVisibleHeight()
+	offset := min(max(0, m.aiUsageScrollOffset), max(0, len(rows)-visibleHeight))
+	rows = rows[offset:min(len(rows), offset+visibleHeight)]
+	for len(rows) < visibleHeight {
+		rows = append(rows, "")
+	}
+	lines = append(lines, contentBoxRows(rows, m.width)...)
+	help := " ↑/↓ or wheel scroll · PgUp/PgDn page · Home/End · ←/→ tabs · r refresh · q quit"
+	lines = append(lines, contentBoxBottom(m.width), m.statusLine(), metaStyle.Render(truncate(help, m.width)))
+	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) aiUsageRows() []string {
+	lines := []string{}
 	if len(m.aiUsage) == 0 && (m.aiUsageLimitsLoading || m.aiUsageActivityLoading) {
 		lines = append(lines, metaStyle.Render(" Loading AI usage…"))
 	} else if len(m.aiUsage) == 0 {
@@ -234,7 +248,8 @@ func (m Model) aiUsageView() string {
 					if !limit.Reset.IsZero() {
 						reset = limit.Reset.Local().Format("Jan 02 15:04")
 					}
-					limitRows = append(limitRows, fmt.Sprintf(" %-8s %s %5.1f%%  Reset %s", limit.Label, usageGauge(limit.Used, 18), limit.Used, reset))
+					remaining := remainingUsagePercent(limit.Used)
+					limitRows = append(limitRows, fmt.Sprintf(" %-8s %s  Remaining %5.1f%%  Reset %s", limit.Label, usageGauge(remaining, 18), remaining, reset))
 				}
 			}
 			if len(usage.Limits) > 0 && usage.Notice != "" {
@@ -255,12 +270,24 @@ func (m Model) aiUsageView() string {
 			lines = append(lines, strings.Split(contentPanel(usage.Name, rows, m.width-2, len(rows)+2, false), "\n")...)
 		}
 	}
-	for renderedLineCount(lines) < m.height-3 {
-		lines = append(lines, "")
-	}
-	lines = append(lines[:contentStart], append(contentBoxRows(lines[contentStart:], m.width), contentBoxBottom(m.width))...)
-	lines = append(lines, m.statusLine(), metaStyle.Render(" ←/→ tabs · r refresh · q quit"))
-	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+	return lines
+}
+
+func (m Model) aiUsageVisibleHeight() int {
+	// The header occupies one rendered row and tabsView occupies three. Keep
+	// those four rows plus the content bottom, status, and help rows visible.
+	return max(1, m.height-7)
+}
+
+func (m Model) aiUsageMaxScrollOffset() int {
+	return max(0, len(m.aiUsageRows())-m.aiUsageVisibleHeight())
+}
+
+func (m Model) moveAIUsageScroll(delta int) Model {
+	maximum := m.aiUsageMaxScrollOffset()
+	current := min(max(0, m.aiUsageScrollOffset), maximum)
+	m.aiUsageScrollOffset = min(max(0, current+delta), maximum)
+	return m
 }
 
 func appendUsageSection(rows, section []string) []string {
@@ -323,6 +350,10 @@ func usageGauge(percent float64, width int) string {
 	percent = min(100, max(0, percent))
 	filled := int(percent*float64(width)/100 + .5)
 	return lipgloss.NewStyle().Foreground(green).Render(strings.Repeat("█", filled)) + metaStyle.Render(strings.Repeat("░", width-filled))
+}
+
+func remainingUsagePercent(used float64) float64 {
+	return min(100, max(0, 100-used))
 }
 
 func usageGrassRows(days []aiusage.Day, width int, now time.Time) []string {

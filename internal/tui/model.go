@@ -255,6 +255,7 @@ type Model struct {
 	aiUsage                []aiusage.Provider
 	aiUsageLimitsLoading   bool
 	aiUsageActivityLoading bool
+	aiUsageScrollOffset    int
 	updateAvailable        bool
 	checkUpdate            updateChecker
 	installUpdate          installCommand
@@ -1097,6 +1098,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.aiUsageLimitsLoading = true
 				m.aiUsageActivityLoading = true
 				return m, loadAIUsageCmds()
+			case "up", "k":
+				return m.moveAIUsageScroll(-1), nil
+			case "down", "j":
+				return m.moveAIUsageScroll(1), nil
+			case "pgup", "ctrl+u":
+				return m.moveAIUsageScroll(-m.aiUsageVisibleHeight()), nil
+			case "pgdown", "ctrl+d":
+				return m.moveAIUsageScroll(m.aiUsageVisibleHeight()), nil
+			case "home", "g":
+				m.aiUsageScrollOffset = 0
+				return m, nil
+			case "end", "G":
+				m.aiUsageScrollOffset = m.aiUsageMaxScrollOffset()
+				return m, nil
 			case "q":
 				return m, tea.Quit
 			}
@@ -3113,6 +3128,9 @@ func (m Model) handleWheelScroll(msg WheelScrollMsg) (tea.Model, tea.Cmd) {
 	}
 	const linesPerWheelClick = 3
 	lines := msg.Delta * linesPerWheelClick
+	if m.aiUsageActive() {
+		return m.moveAIUsageScroll(lines), nil
+	}
 	if m.localTab() {
 		leftWidth, _ := m.workspacePaneWidths()
 		if msg.X >= leftWidth+1 {
