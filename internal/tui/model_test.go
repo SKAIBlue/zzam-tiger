@@ -1963,7 +1963,7 @@ func TestUnavailableCapabilitiesRenderWithoutStartingRemoteWork(t *testing.T) {
 		WithLocalUnavailable(errors.New("Git repository required")).
 		WithRemoteUnavailable(errors.New("GitHub CLI (gh) is not installed; run gh auth login"))
 	if cmd := m.Init(); cmd != nil {
-		t.Fatal("unavailable capabilities started background polling or loading")
+		t.Fatal("unavailable capabilities or lazy AI Usage started background work")
 	}
 	m.width, m.height = 100, 20
 	view := m.View()

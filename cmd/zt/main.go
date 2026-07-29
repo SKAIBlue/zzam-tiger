@@ -19,7 +19,7 @@ var version = "dev"
 func main() {
 	providerName := flag.String("provider", "auto", "provider: auto, github, or gitlab")
 	repo := flag.String("repo", "", "repository (owner/name or group/project); defaults to the current git repository")
-	refresh := flag.Duration("refresh", 5*time.Second, "remote provider refresh interval (0 disables; local tabs use filesystem events)")
+	refresh := flag.Duration("refresh", 5*time.Second, "remote provider refresh interval (0 disables; local tabs use focused watching and polling)")
 	showVersion := flag.Bool("version", false, "print version")
 	flag.Parse()
 

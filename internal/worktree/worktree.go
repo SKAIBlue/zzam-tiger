@@ -607,6 +607,56 @@ func (c *Client) UnstageAll(ctx context.Context) error {
 	return err
 }
 
+// RevertPath discards staged, unstaged, and untracked changes under path.
+func (c *Client) RevertPath(ctx context.Context, path string) error {
+	clean, err := cleanPath(path)
+	if err != nil {
+		return err
+	}
+	status, err := c.Status(ctx)
+	if err != nil {
+		return err
+	}
+	contains := func(candidate string) bool {
+		return candidate == clean || strings.HasPrefix(candidate, clean+"/")
+	}
+	tracked := make(map[string]struct{})
+	for _, group := range [][]Change{status.Staged, status.Unstaged} {
+		for _, change := range group {
+			if !contains(change.Path) && !contains(change.OldPath) {
+				continue
+			}
+			if change.Code != 'A' && change.OldPath == "" {
+				tracked[change.Path] = struct{}{}
+			}
+			if change.OldPath != "" {
+				tracked[change.OldPath] = struct{}{}
+			}
+		}
+	}
+	hasHead := true
+	if _, err := c.git(ctx, "rev-parse", "--verify", "HEAD"); err != nil {
+		hasHead = false
+		if _, err := c.git(ctx, "rm", "--cached", "-r", "-q", "-f", "--ignore-unmatch", "--", clean); err != nil {
+			return err
+		}
+	} else if _, err := c.git(ctx, "reset", "-q", "HEAD", "--", clean); err != nil {
+		return err
+	}
+	if hasHead {
+		for trackedPath := range tracked {
+			if _, err := c.git(ctx, "cat-file", "-e", "HEAD:"+trackedPath); err != nil {
+				continue
+			}
+			if _, err := c.git(ctx, "checkout", "-q", "HEAD", "--", trackedPath); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = c.git(ctx, "clean", "-f", "-d", "--", clean)
+	return err
+}
+
 // Commit creates a commit from the current index using message.
 func (c *Client) Commit(ctx context.Context, message string) error {
 	message = strings.TrimSpace(message)

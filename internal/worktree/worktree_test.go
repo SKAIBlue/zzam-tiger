@@ -218,6 +218,40 @@ func TestStatusStageUnstageAndDiff(t *testing.T) {
 	}
 }
 
+func TestRevertPathDiscardsDirectoryChanges(t *testing.T) {
+	repo := newRepo(t)
+	writeFile(t, repo, "docs/tracked.txt", []byte("base\n"))
+	writeFile(t, repo, "keep.txt", []byte("keep\n"))
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-m", "initial")
+	writeFile(t, repo, "docs/tracked.txt", []byte("changed\n"))
+	writeFile(t, repo, "docs/new.txt", []byte("new\n"))
+	git(t, repo, "add", "--", "docs/tracked.txt", "docs/new.txt")
+	writeFile(t, repo, "docs/untracked.txt", []byte("untracked\n"))
+	writeFile(t, repo, "keep.txt", []byte("outside\n"))
+
+	client := New(repo, provider.ExecRunner{})
+	if err := client.RevertPath(context.Background(), "docs"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(repo, "docs/tracked.txt"))
+	if err != nil || string(data) != "base\n" {
+		t.Fatalf("tracked file after revert = %q, %v", data, err)
+	}
+	for _, path := range []string{"docs/new.txt", "docs/untracked.txt"} {
+		if _, err := os.Stat(filepath.Join(repo, path)); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists after revert: %v", path, err)
+		}
+	}
+	status, err := client.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Staged) != 0 || len(status.Untracked) != 0 || len(status.Unstaged) != 1 || status.Unstaged[0].Path != "keep.txt" {
+		t.Fatalf("status after directory revert = %#v", status)
+	}
+}
+
 func TestHistoryReturnsBranchesAndTopology(t *testing.T) {
 	repo := newRepo(t)
 	writeFile(t, repo, "base.txt", []byte("base\n"))

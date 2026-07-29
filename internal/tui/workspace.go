@@ -39,6 +39,7 @@ type workspaceClient interface {
 	StageAll(context.Context) error
 	Unstage(context.Context, string) error
 	UnstageAll(context.Context) error
+	RevertPath(context.Context, string) error
 	Commit(context.Context, string) error
 	RemoteState(context.Context) (worktree.RemoteState, error)
 	Pull(context.Context) error
@@ -266,17 +267,27 @@ func (m Model) startActiveTabLoad() (Model, tea.Cmd) {
 	m.workspacePreviewLoading = false
 	m.workspacePreviewErr = nil
 	m.workspacePreviewRequest++
+	m.workspacePollGeneration++
 	m.err = nil
+	var poll tea.Cmd
+	if m.workspaceFilesActive() {
+		poll = workspacePollTickCmd(m.workspacePollGeneration)
+	}
+	if m.aiUsageActive() {
+		m.aiUsageLimitsLoading = true
+		m.aiUsageActivityLoading = true
+		return m, tea.Batch(tea.ClearScreen, loadAIUsageCmds(), aiUsageTickCmd(), poll)
+	}
 	if m.localTab() {
 		next, load := m.startWorkspaceLoad()
-		return next, tea.Batch(tea.ClearScreen, load)
+		return next, tea.Batch(tea.ClearScreen, load, poll)
 	}
 	next, load := m.startListLoad()
 	// File previews can emit terminal-side graphics commands. Clear the frame
 	// when changing tabs so Bubble Tea repaints the header and tabs instead of
 	// relying on an incremental diff against a terminal that was altered outside
 	// its renderer.
-	return next, tea.Batch(tea.ClearScreen, load)
+	return next, tea.Batch(tea.ClearScreen, load, poll)
 }
 
 func (m Model) workspacePreviewAvailable() bool {
@@ -578,35 +589,53 @@ func (m Model) loadSelectedWorkspaceItem() (Model, tea.Cmd) {
 	if m.workspaceFilesActive() {
 		entries := m.filteredWorkspaceEntries()
 		if len(entries) == 0 || entries[m.workspaceCursor].IsDir {
+			m.watchWorkspaceFile("")
 			m.workspacePreviewOffset = 0
 			m.workspaceFile = worktree.File{}
 			return m, nil
 		}
+		m.watchWorkspaceFile(entries[m.workspaceCursor].Path)
 		if entries[m.workspaceCursor].Path != m.workspaceFile.Path {
 			m.workspacePreviewOffset = 0
 		}
 		m.workspacePreviewLoading = true
 		return m, m.fetchWorkspaceFileCmd(m.workspacePreviewRequest, entries[m.workspaceCursor].Path)
 	}
-	m.workspaceDiffRows = nil
-	m.workspaceDiffWidth = 0
 	changes := m.filteredWorkspaceChanges()
 	if len(changes) == 0 {
+		m.watchWorkspaceFile("")
 		m.workspacePreviewOffset = 0
 		m.workspaceDiff = worktree.Diff{}
+		m.workspaceDiffRows = nil
+		m.workspaceDiffWidth = 0
 		return m, nil
 	}
 	selected := changes[m.workspaceCursor]
 	if selected.isDir {
+		m.watchWorkspaceFile("")
 		m.workspacePreviewOffset = 0
 		m.workspaceDiff = worktree.Diff{}
+		m.workspaceDiffRows = nil
+		m.workspaceDiffWidth = 0
 		return m, nil
 	}
+	m.watchWorkspaceFile(selected.displayPath())
 	if selected.displayPath() != m.workspaceDiff.Path {
 		m.workspacePreviewOffset = 0
+		m.workspaceDiffRows = nil
+		m.workspaceDiffWidth = 0
 	}
 	m.workspacePreviewLoading = true
 	return m, m.fetchWorkspaceDiffCmd(m.workspacePreviewRequest, selected.displayPath(), selected.staged)
+}
+
+func (m *Model) watchWorkspaceFile(path string) {
+	type fileWatcher interface{ WatchFile(string) error }
+	if watcher, ok := m.watcher.(fileWatcher); ok {
+		if err := watcher.WatchFile(path); err != nil {
+			m.workspaceWatcherErr = fmt.Errorf("watch preview file: %w", err)
+		}
+	}
 }
 
 func (m Model) filteredWorkspaceEntries() []worktree.Entry {
@@ -1138,8 +1167,8 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.active = index
 			return m.startActiveTabLoad()
 		}
-	case "!", "@", "#", "$", "%", "^", "&", "*":
-		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5, "&": 6, "*": 7}
+	case "!", "@", "#", "$", "%", "^", "&", "*", "(":
+		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5, "&": 6, "*": 7, "(": 8}
 		if index := shiftTabs[msg.String()]; index < m.tabCount() {
 			m.active = index
 			return m.startActiveTabLoad()
@@ -1292,6 +1321,18 @@ func (m Model) startWorkspacePathStage(path string, unstage bool) (tea.Model, te
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return workspaceActionResultMsg{request: request, action: action, err: run(ctx, path)}
+	}
+}
+
+func (m Model) startWorkspacePathRevert(path string) (tea.Model, tea.Cmd) {
+	m.actionBusy = true
+	m.workspacePendingPath = path
+	m.status = "revert " + sanitizeWorkspaceLabel(path) + "…"
+	request := m.workspaceRequest
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return workspaceActionResultMsg{request: request, action: "revert", err: m.workspace.RevertPath(ctx, path)}
 	}
 }
 

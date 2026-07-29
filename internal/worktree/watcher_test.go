@@ -15,7 +15,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-func TestWatcherDetectsWorktreeChangesAndNewDirectories(t *testing.T) {
+func TestWatcherDetectsChangesToSelectedFile(t *testing.T) {
 	root := initWatcherRepo(t)
 	w, err := NewWatcher(root)
 	if err != nil {
@@ -27,8 +27,10 @@ func TestWatcherDetectsWorktreeChangesAndNewDirectories(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	waitForWatchPath(t, w, dir)
 	file := filepath.Join(dir, "file.txt")
+	if err := w.WatchFile(file); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(file, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +44,9 @@ func TestWatcherDetectsWorktreeChangesAndNewDirectories(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForAnyWatchPath(t, w, file, renamed)
+	if err := w.WatchFile(renamed); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(renamed); err != nil {
 		t.Fatal(err)
 	}
@@ -56,10 +61,48 @@ func TestWatcherDetectsChangesOutsideGitRepository(t *testing.T) {
 	}
 	defer w.Close()
 	path := filepath.Join(root, "plain.txt")
+	if err := w.WatchFile(path); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("one"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	waitForWatchPath(t, w, path)
+}
+
+func TestWatcherKeepsOnlySelectedFileDirectory(t *testing.T) {
+	root := t.TempDir()
+	firstDir := filepath.Join(root, "first")
+	secondDir := filepath.Join(root, "second")
+	for _, dir := range []string{firstDir, secondDir} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := NewWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.WatchFile(filepath.Join(firstDir, "one.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WatchFile(filepath.Join(secondDir, "two.txt")); err != nil {
+		t.Fatal(err)
+	}
+	watches := w.fs.WatchList()
+	if containsCleanPath(watches, firstDir) || !containsCleanPath(watches, secondDir) {
+		t.Fatalf("watch list = %v, want only selected directory %q", watches, secondDir)
+	}
+}
+
+func containsCleanPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if filepath.Clean(path) == filepath.Clean(target) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPollingWatcherDetectsChangesWhenNativeWatchesAreUnavailable(t *testing.T) {
@@ -175,6 +218,9 @@ drain:
 		}
 	}
 	inside := filepath.Join(root, "inside.txt")
+	if err := w.WatchFile(inside); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(inside, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -229,6 +275,9 @@ func TestWatcherSupportsLinkedWorktreeAndCloses(t *testing.T) {
 	runGit(t, root, "worktree", "add", "-b", "linked-test", linked)
 	w, err := NewWatcher(linked)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WatchFile(filepath.Join(linked, "linked.txt")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(linked, "linked.txt"), []byte("x"), 0o644); err != nil {

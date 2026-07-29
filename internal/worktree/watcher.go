@@ -19,13 +19,16 @@ type WatchUpdate struct {
 
 // Watcher watches one worktree and the Git metadata that affects its status.
 type Watcher struct {
-	fs      *fsnotify.Watcher
-	root    string
-	gitDirs []string
-	polling bool
-	updates chan WatchUpdate
-	done    chan struct{}
-	once    sync.Once
+	fs          *fsnotify.Watcher
+	root        string
+	gitDirs     []string
+	polling     bool
+	mu          sync.RWMutex
+	watchedFile string
+	watchedDir  string
+	updates     chan WatchUpdate
+	done        chan struct{}
+	once        sync.Once
 }
 
 // NewWatcher starts a recursive watcher. Symlinked directories are deliberately
@@ -51,10 +54,9 @@ func NewWatcher(root string) (*Watcher, error) {
 		return nil, err
 	}
 	w.gitDirs = gitDirs
-	if err := w.addTree(root, true); err != nil {
-		fs.Close()
-		return newPollingWatcher(root), nil
-	}
+	// Keep the native worktree watch set constant-sized. Directory listings are
+	// refreshed by the TUI's shallow polling; fsnotify is reserved for the file
+	// currently shown in the preview.
 	for _, dir := range gitDirs {
 		if err := w.addGitWatches(dir); err != nil {
 			fs.Close()
@@ -63,6 +65,52 @@ func NewWatcher(root string) (*Watcher, error) {
 	}
 	go w.run()
 	return w, nil
+}
+
+// WatchFile moves the single live content watch to path. An empty path clears
+// it; directory listings are intentionally left to the TUI polling loop.
+func (w *Watcher) WatchFile(path string) error {
+	if w.fs == nil || w.polling {
+		w.mu.Lock()
+		w.watchedFile = cleanWatchPath(w.root, path)
+		w.mu.Unlock()
+		return nil
+	}
+	path = cleanWatchPath(w.root, path)
+	dir := ""
+	if path != "" {
+		if !within(w.root, path) {
+			return fmt.Errorf("watch file %q is outside root", path)
+		}
+		dir = filepath.Dir(path)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if path == w.watchedFile {
+		return nil
+	}
+	if dir != "" && dir != w.watchedDir {
+		if err := w.fs.Add(dir); err != nil {
+			return err
+		}
+	}
+	oldDir := w.watchedDir
+	w.watchedFile, w.watchedDir = path, dir
+	if oldDir != "" && oldDir != dir {
+		_ = w.fs.Remove(oldDir)
+	}
+	return nil
+}
+
+func cleanWatchPath(root, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	path, _ = filepath.Abs(path)
+	return filepath.Clean(path)
 }
 
 // newPollingWatcher is a portable fallback for directory trees that exceed
@@ -186,7 +234,10 @@ func (w *Watcher) pollLoop(previous map[string]fileStamp, initialErr error) {
 		case <-w.done:
 			return
 		case <-ticker.C:
-			current, err := snapshotTree(w.root, w.gitDirs)
+			w.mu.RLock()
+			watchedFile := w.watchedFile
+			w.mu.RUnlock()
+			current, err := snapshotTree(watchedFile, w.gitDirs)
 			if err != nil {
 				w.send(WatchUpdate{Err: err})
 				continue
@@ -202,12 +253,12 @@ func (w *Watcher) pollLoop(previous map[string]fileStamp, initialErr error) {
 	}
 }
 
-func snapshotTree(root string, gitDirs []string) (map[string]fileStamp, error) {
+func snapshotTree(watchedFile string, gitDirs []string) (map[string]fileStamp, error) {
 	snapshot := make(map[string]fileStamp)
-	if err := snapshotDirectory(snapshot, root, func(path string, entry os.DirEntry) bool {
-		return path != root && entry.IsDir() && (entry.Name() == ".git" || entry.Type()&os.ModeSymlink != 0)
-	}); err != nil {
-		return nil, err
+	if watchedFile != "" {
+		if err := snapshotFile(snapshot, watchedFile); err != nil {
+			return nil, err
+		}
 	}
 	for _, gitDir := range gitDirs {
 		for _, name := range []string{"HEAD", "index", "packed-refs"} {
@@ -349,7 +400,10 @@ func (w *Watcher) insideGitRefs(path string) bool {
 }
 
 func (w *Watcher) relevant(path string) bool {
-	if w.insideRoot(path) && filepath.Base(path) != ".git" {
+	w.mu.RLock()
+	watchedFile := w.watchedFile
+	w.mu.RUnlock()
+	if filepath.Clean(path) == watchedFile {
 		return true
 	}
 	for _, dir := range w.gitDirs {

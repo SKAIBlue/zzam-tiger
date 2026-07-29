@@ -14,10 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/SKAIBlue/zzam-tiger/internal/aiusage"
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
@@ -32,6 +34,7 @@ type fakeWorkspace struct {
 	diffErrs     map[string]error
 	staged       []string
 	unstaged     []string
+	reverted     []string
 	stageAll     int
 	unstageAll   int
 	commits      []string
@@ -118,6 +121,42 @@ func TestWorkspaceWatchCoalescesEventDuringLoad(t *testing.T) {
 	}
 }
 
+func TestWorkspaceDirectoryPollingDoesNotReloadCommitDiff(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceCommitTab
+	m.workspaceLoading = false
+	m.workspaceRequest = 7
+
+	updated, command := m.Update(workspacePollTickMsg(m.workspacePollGeneration))
+	m = updated.(Model)
+	if m.workspaceLoading || m.workspaceRequest != 7 {
+		t.Fatalf("Commit poll reloaded diff: loading=%t request=%d", m.workspaceLoading, m.workspaceRequest)
+	}
+	if command != nil {
+		t.Fatal("Commit tab rescheduled directory polling")
+	}
+
+	m.active = workspaceFilesTab
+	updated, _ = m.Update(workspacePollTickMsg(m.workspacePollGeneration))
+	m = updated.(Model)
+	if !m.workspaceLoading {
+		t.Fatal("Files poll did not refresh directory listings")
+	}
+}
+
+func TestWorkspaceDashboardInputsUseStaticCursors(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	if m.fileFilter.Cursor.Mode() != cursor.CursorStatic || m.commitMessage.Cursor.Mode() != cursor.CursorStatic {
+		t.Fatalf("dashboard cursor modes: filter=%v commit=%v", m.fileFilter.Cursor.Mode(), m.commitMessage.Cursor.Mode())
+	}
+	if command := m.fileFilter.Focus(); command != nil {
+		t.Fatal("static filter cursor scheduled a blink command")
+	}
+	if command := m.commitMessage.Focus(); command != nil {
+		t.Fatal("static commit cursor scheduled a blink command")
+	}
+}
+
 func TestWorkspaceWatcherErrorsAndCloseRemainSafe(t *testing.T) {
 	watcher := &fakeWorkspaceWatcher{updates: make(chan worktree.WatchUpdate, 1)}
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
@@ -155,6 +194,10 @@ func (w *fakeWorkspace) Unstage(_ context.Context, path string) error {
 	return nil
 }
 func (w *fakeWorkspace) UnstageAll(context.Context) error { w.unstageAll++; return nil }
+func (w *fakeWorkspace) RevertPath(_ context.Context, path string) error {
+	w.reverted = append(w.reverted, path)
+	return nil
+}
 func (w *fakeWorkspace) RemoteState(context.Context) (worktree.RemoteState, error) {
 	return w.remote, nil
 }
@@ -257,7 +300,7 @@ func TestRemoteBranchDeletionConfirmationShowsRemoteAndGitOperation(t *testing.T
 
 func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
-	want := []string{"Commit", "Files", "Graph", "Branches", "PRs", "Issues", "Milestones", "CI Runs"}
+	want := []string{"Commit", "Files", "Graph", "Branches", "PRs", "Issues", "Milestones", "CI Runs", "AI Usage"}
 	got := m.tabLabels()
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("tabs = %#v, want %#v", got, want)
@@ -267,9 +310,166 @@ func TestWorkspaceTabsLeadAndCommitsAreGraph(t *testing.T) {
 	}
 }
 
+func TestAIUsageRefreshesEveryMinuteOnlyWhileActive(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = m.tabCount() - 1
+	updated, cmd := m.Update(aiUsageTickMsg(time.Now()))
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("active AI Usage did not schedule refresh")
+	}
+	m.active = workspaceFilesTab
+	_, cmd = m.Update(aiUsageTickMsg(time.Now()))
+	if cmd != nil {
+		t.Fatal("inactive AI Usage kept scheduling refresh")
+	}
+}
+
+func TestAIUsageShowsLimitsWhileActivityIsCollecting(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = m.tabCount() - 1
+	m.width, m.height = 100, 24
+	m.aiUsageActivityLoading = true
+	m.aiUsage = []aiusage.Provider{{
+		Name:         aiusage.CodexName,
+		LimitsLoaded: true,
+		Limits:       []aiusage.Limit{{Label: "5 hours", Used: 21}},
+	}}
+	view := ansi.Strip(m.aiUsageView())
+	for _, want := range []string{"21.0%", "Collecting…", "Collecting activity…"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("AI Usage view does not contain %q while activity loads:\n%s", want, view)
+		}
+	}
+}
+
+func TestMergeAIUsageProvidersIncludesModelBreakdown(t *testing.T) {
+	current := []aiusage.Provider{{Name: aiusage.CodexName, LimitsLoaded: true}}
+	models := []aiusage.ModelUsage{{Model: "gpt-5", Input: 100, Cached: 60, Output: 20}}
+	got := mergeAIUsageProviders(current, []aiusage.Provider{{
+		Name: aiusage.CodexName, ActivityLoaded: true, TotalTokens: 120, Models: models,
+	}})
+	if len(got) != 1 || len(got[0].Models) != 1 || got[0].Models[0] != models[0] {
+		t.Fatalf("merged AI usage models = %#v", got)
+	}
+}
+
+func TestAIUsageShowsModelTokenBreakdownBelowTotal(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = m.tabCount() - 1
+	m.width, m.height = 100, 30
+	m.aiUsage = []aiusage.Provider{{
+		Name: aiusage.CodexName, TotalTokens: 1750, MonthlyTokens: 750, ActivityLoaded: true, LimitsLoaded: true,
+		Models: []aiusage.ModelUsage{{Model: "gpt-5-very-long-model-name", Input: 1500, Cached: 1000, Output: 250}},
+	}}
+	view := ansi.Strip(m.aiUsageView())
+	total := strings.Index(view, "Total tokens")
+	header := strings.Index(view, "Model")
+	model := strings.Index(view, "gpt-5-very-long-model-name")
+	if total < 0 || model < total || !strings.Contains(view, "Est. API cost") || !strings.Contains(view, "Period") || !strings.Contains(view, "Input") || !strings.Contains(view, "Cached") || !strings.Contains(view, "Output") || !strings.Contains(view, "Total") || !strings.Contains(view, "Month") || !strings.Contains(view, "Cost") {
+		t.Fatalf("AI Usage view is missing model breakdown below total:\n%s", view)
+	}
+	if header < total || header > model {
+		t.Fatalf("AI Usage model table header is not between total and data row:\n%s", view)
+	}
+	if !strings.Contains(view, "This month 750") {
+		t.Fatalf("AI Usage view is missing monthly total tokens:\n%s", view)
+	}
+}
+
+func TestModelUsageTableUsesWideModelColumn(t *testing.T) {
+	rows := modelUsageTableRows([]aiusage.ModelUsage{{Model: "gpt-5", Input: 10, Cached: 5, Output: 2}}, 90)
+	if len(rows) != 4 {
+		t.Fatalf("model usage table rows = %d, want 4", len(rows))
+	}
+	header := ansi.Strip(rows[0])
+	inputColumn := strings.Index(header, "Input")
+	if inputColumn < 33 {
+		t.Fatalf("Input column starts at %d, model column is not wide enough: %q", inputColumn, header)
+	}
+}
+
+func TestModelUsageTableSeparatesTotalAndMonthlyTokens(t *testing.T) {
+	usage := aiusage.ModelUsage{
+		Model: "gpt-5.5", Input: 1000, Cached: 600, Output: 200,
+		MonthlyInput: 400, MonthlyCached: 250, MonthlyOutput: 80,
+	}
+	rows := modelUsageTableRows([]aiusage.ModelUsage{usage}, 100)
+	total := ansi.Strip(rows[2])
+	monthly := ansi.Strip(rows[3])
+	if !strings.Contains(total, "Total") || !strings.Contains(total, "1.0K") || !strings.Contains(total, "600") || !strings.Contains(total, "200") {
+		t.Fatalf("total model row = %q", total)
+	}
+	if !strings.Contains(monthly, "Month") || !strings.Contains(monthly, "400") || !strings.Contains(monthly, "250") || !strings.Contains(monthly, "80") {
+		t.Fatalf("monthly model row = %q", monthly)
+	}
+}
+
+func TestModelUsageTableSeparatesModelGroups(t *testing.T) {
+	models := []aiusage.ModelUsage{{Model: "gpt-5.5"}, {Model: "gpt-5.6-sol"}}
+	rows := modelUsageTableRows(models, 100)
+	if len(rows) != 7 {
+		t.Fatalf("model usage rows = %d, want header, divider, two model pairs, and a group divider", len(rows))
+	}
+	separator := ansi.Strip(rows[4])
+	if !strings.Contains(separator, "─────────") || strings.Contains(separator, "gpt-") {
+		t.Fatalf("model group separator = %q", separator)
+	}
+}
+
+func TestAppendAIUsageSectionsAddsOneBlankRow(t *testing.T) {
+	rows := []string{}
+	for _, section := range [][]string{{"total"}, {"models-1", "models-2"}, {"limit"}, {"activity"}, {"updated"}} {
+		rows = appendUsageSection(rows, section)
+	}
+	want := []string{"total", "", "models-1", "models-2", "", "limit", "", "activity", "", "updated"}
+	if !reflect.DeepEqual(rows, want) {
+		t.Fatalf("AI Usage section rows = %#v, want %#v", rows, want)
+	}
+}
+
+func TestAIUsageActivityRendersWeekColumnsAndSevenWeekdayRows(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	rows := usageGrassRows([]aiusage.Day{{Date: "2026-07-03", Tokens: 100}, {Date: "2026-07-28", Tokens: 300}}, 60, now)
+	if len(rows) != 8 {
+		t.Fatalf("activity rows = %d, want date header plus 7 weekdays", len(rows))
+	}
+	header := ansi.Strip(rows[0])
+	if !strings.HasSuffix(strings.TrimSpace(header), "26") {
+		t.Fatalf("current week header = %q, want Sunday 26", header)
+	}
+	if strings.Contains(header, "8/1") {
+		t.Fatalf("header uses a date inside the current week: %q", header)
+	}
+	for index, label := range []string{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"} {
+		plain := ansi.Strip(rows[index+1])
+		if !strings.HasPrefix(plain, label) {
+			t.Fatalf("row %d = %q, want %s", index, plain, label)
+		}
+		if ansi.StringWidth(rows[index+1]) > 60 {
+			t.Fatalf("row %d width exceeds panel: %d", index, ansi.StringWidth(rows[index+1]))
+		}
+	}
+	for _, weekday := range []int{3, 4, 5, 6} {
+		plain := ansi.Strip(rows[weekday+1])
+		if strings.TrimSpace(plain[len(plain)-5:]) != "" {
+			t.Fatalf("future %s cell is rendered: %q", []string{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"}[weekday], plain)
+		}
+	}
+}
+
+func TestAIUsageActivityLabelsFirstColumnAndSundayMonthChanges(t *testing.T) {
+	now := time.Date(2026, time.March, 17, 12, 0, 0, 0, time.UTC)
+	rows := usageGrassRows(nil, 15, now)
+	header := ansi.Strip(rows[0])
+	if header != "     3/8   15  " {
+		t.Fatalf("header = %q, want first date left-aligned and later dates centered over activity cells", header)
+	}
+}
+
 func TestUnavailableProviderShowsOnlyLocalGraphAndBranches(t *testing.T) {
 	m := newWithWorkspace(nil, time.Second, &fakeWorkspace{branches: []worktree.Branch{{Name: "main", SHA: "abcdef012345", Head: true}}}).WithRemoteUnavailable(errors.New("gh missing"))
-	want := []string{"Commit", "Files", "Graph", "Branches"}
+	want := []string{"Commit", "Files", "Graph", "Branches", "AI Usage"}
 	if got := m.tabLabels(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("unavailable-provider tabs = %#v, want %#v", got, want)
 	}
@@ -361,49 +561,38 @@ func TestFilesOnlyModeHasNoGitOrRemoteTabs(t *testing.T) {
 	if !m.localTab() || !m.workspaceFilesActive() || m.workspaceCommitActive() {
 		t.Fatalf("files-only state: local=%t files=%t commit=%t", m.localTab(), m.workspaceFilesActive(), m.workspaceCommitActive())
 	}
-	if got := m.tabLabels(); !reflect.DeepEqual(got, []string{"Files"}) {
+	if got := m.tabLabels(); !reflect.DeepEqual(got, []string{"Files", "AI Usage"}) {
 		t.Fatalf("files-only tabs = %#v", got)
 	}
-	if m.tabCount() != 1 {
-		t.Fatalf("files-only tab count = %d, want 1", m.tabCount())
+	if m.tabCount() != 2 {
+		t.Fatalf("files-only tab count = %d, want 2", m.tabCount())
 	}
 	if header := ansi.Strip(m.headerView("")); !strings.Contains(header, "Git repository not detected") {
 		t.Fatalf("header did not explain files-only mode: %q", header)
 	}
 }
 
-func TestFilesOnlyModeRefreshesAfterRealFilesystemWatchEvent(t *testing.T) {
+func TestFilesOnlyModeRefreshesAfterDirectoryPoll(t *testing.T) {
 	root := t.TempDir()
 	m := NewFilesOnly(worktree.NewFilesystem(root))
 	defer m.Close()
 	m.workspaceLoading = false
 
-	watch := waitWorkspaceWatchCmd(m.watcher)
 	path := filepath.Join(root, "created.txt")
 	if err := os.WriteFile(path, []byte("created"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	message := watch()
-	update, cmd := m.Update(message)
+	update, cmd := m.Update(workspacePollTickMsg(m.workspacePollGeneration))
 	m = update.(Model)
-	if cmd == nil || m.workspaceWatchGeneration == 0 {
-		t.Fatalf("watch event did not schedule reload: cmd=%v generation=%d", cmd != nil, m.workspaceWatchGeneration)
+	if cmd == nil || !m.workspaceLoading {
+		t.Fatalf("directory poll did not schedule reload: cmd=%v loading=%t", cmd != nil, m.workspaceLoading)
 	}
-	// The returned batch contains the next watch command and a debounced reload.
+	// The returned batch contains the next poll and the directory reload.
 	batch, ok := cmd().(tea.BatchMsg)
 	if !ok || len(batch) != 2 {
-		t.Fatalf("watch command = %#v, want watch and debounce batch", cmd())
+		t.Fatalf("poll command = %#v, want poll and reload batch", cmd())
 	}
-	debounce := batch[1]()
-	if _, ok := debounce.(workspaceDebounceMsg); !ok {
-		t.Fatalf("watch batch second command = %T, want workspaceDebounceMsg", debounce)
-	}
-	update, load := m.Update(debounce)
-	m = update.(Model)
-	if load == nil {
-		t.Fatal("debounce did not start Files-only reload")
-	}
-	result := load()
+	result := batch[1]()
 	if batch, ok := result.(tea.BatchMsg); ok {
 		for _, candidate := range batch {
 			update, _ = m.Update(candidate())
@@ -414,7 +603,7 @@ func TestFilesOnlyModeRefreshesAfterRealFilesystemWatchEvent(t *testing.T) {
 		m = update.(Model)
 	}
 	if len(m.workspaceEntries) != 1 || m.workspaceEntries[0].Path != "created.txt" {
-		t.Fatalf("Files-only watcher reload entries = %#v", m.workspaceEntries)
+		t.Fatalf("Files-only poll reload entries = %#v", m.workspaceEntries)
 	}
 }
 
@@ -1172,6 +1361,29 @@ func TestWorkspaceResizeDoesNotCancelPendingPreview(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitRefreshKeepsCurrentDiffUntilReplacementArrives(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active = workspaceCommitTab
+	m.workspaceRequest = 4
+	m.workspaceLoading = true
+	m.workspaceDiff = worktree.Diff{Path: "main.go"}
+	m.workspaceDiffRows = []string{"existing diff"}
+	m.workspaceDiffWidth = 80
+
+	updated, command := m.Update(workspaceResultMsg{
+		request: 4,
+		op:      "status",
+		status:  worktree.Status{Unstaged: []worktree.Change{{Path: "main.go", Code: 'M'}}},
+	})
+	m = updated.(Model)
+	if command == nil || !m.workspacePreviewLoading {
+		t.Fatal("status refresh did not request a replacement diff")
+	}
+	if got := strings.Join(m.workspaceDiffRows, "\n"); got != "existing diff" {
+		t.Fatalf("current diff was cleared while replacement loaded: %q", got)
+	}
+}
+
 func TestWorkspaceCommitOrderMatchesRenderedGroups(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	m.active = workspaceCommitTab
@@ -1655,6 +1867,53 @@ func TestWorkspaceCommitChangesRenderAsCollapsibleTree(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCommitDirectoryActionButtons(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 100, 30
+	m.workspaceStatus.Unstaged = []worktree.Change{
+		{Path: "internal/tui/view.go", Code: 'M'},
+		{Path: "internal/tui/model.go", Code: 'M'},
+	}
+	tree := m.dashboardPanelChanges(false)
+	directoryIndex := -1
+	for index, item := range tree {
+		if item.isDir && item.path == "internal/tui" {
+			directoryIndex = index
+			break
+		}
+	}
+	if directoryIndex < 0 {
+		t.Fatalf("directory missing from tree: %#v", tree)
+	}
+	plain := ansi.Strip(m.View())
+	if !strings.Contains(plain, "internal/tui") || !strings.Contains(plain, "↶ ↑") {
+		t.Fatalf("directory action buttons missing:\n%s", plain)
+	}
+
+	left, _, changesTop := m.commitDashboardGeometry()
+	y := changesTop + 1 + directoryIndex
+	updated, cmd := m.Update(tea.MouseMsg{X: left - 1, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("directory stage button did not start an action")
+	}
+	cmd()
+	if !reflect.DeepEqual(workspace.staged, []string{"internal/tui"}) {
+		t.Fatalf("staged paths = %#v", workspace.staged)
+	}
+
+	m.actionBusy = false
+	updated, cmd = m.Update(tea.MouseMsg{X: left - 3, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	if cmd == nil {
+		t.Fatal("directory revert button did not start an action")
+	}
+	cmd()
+	if !reflect.DeepEqual(workspace.reverted, []string{"internal/tui"}) {
+		t.Fatalf("reverted paths = %#v", workspace.reverted)
+	}
+}
+
 func TestWorkspaceCommitCursorSelectsEachTreeRow(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
 	m.active, m.width, m.height = workspaceCommitTab, 100, 30
@@ -1757,6 +2016,47 @@ func TestWorkspaceCommitRemoteButtonsRunActions(t *testing.T) {
 	cmd()
 	if workspace.pushes != 1 {
 		t.Fatalf("push calls = %d, want 1", workspace.pushes)
+	}
+}
+
+func TestWorkspaceCommitMouseUsesFocusedMessageGeometry(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceCommitTab, 90, 24
+	m.workspaceRemote = worktree.RemoteState{Available: true, Behind: 1}
+	m.workspaceStatus.Staged = []worktree.Change{{Path: "ready.go", Code: 'M'}}
+	m.focus = focusCommitMessage
+	m.commitMessage.Focus()
+
+	left, _ := m.commitDashboardWidths()
+	messageWidth := max(1, left-4)
+	m.commitMessage.SetValue(strings.Repeat("x", messageWidth))
+	m.commitMessage.SetCursor(messageWidth)
+	if rows := m.commitMessageRowCount(left); rows != 2 {
+		t.Fatalf("focused boundary message rows = %d, want 2", rows)
+	}
+
+	_, buttonY, _ := m.commitDashboardGeometry()
+	buttonWidth := max(1, (left-4)/3)
+	updated, cmd := m.Update(tea.MouseMsg{X: 2 + buttonWidth/2, Y: buttonY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("Pull button missed its rendered row after focused message geometry changed")
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	if workspace.pulls != 1 {
+		t.Fatalf("pull calls = %d, want 1", workspace.pulls)
+	}
+
+	m.actionBusy = false
+	m.focus = focusCommitMessage
+	m.commitMessage.Focus()
+	_, buttonY, _ = m.commitDashboardGeometry()
+	updated, cmd = m.Update(tea.MouseMsg{X: 3, Y: buttonY + 3, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if cmd == nil || m.workspaceCursor != 0 || m.commitMessage.Focused() {
+		t.Fatalf("Staged row missed after focused message geometry changed: cmd=%v cursor=%d messageFocused=%t", cmd != nil, m.workspaceCursor, m.commitMessage.Focused())
 	}
 }
 

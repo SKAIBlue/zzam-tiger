@@ -3,10 +3,13 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/cursor"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -14,6 +17,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/SKAIBlue/zzam-tiger/internal/aiusage"
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
@@ -106,6 +110,9 @@ type actionResultMsg struct {
 }
 
 type tickMsg time.Time
+type aiUsageLimitsMsg struct{ providers []aiusage.Provider }
+type aiUsageActivityMsg struct{ providers []aiusage.Provider }
+type aiUsageTickMsg time.Time
 
 type commitRemoteTickMsg time.Time
 
@@ -121,6 +128,7 @@ type workspaceWatchMsg struct {
 }
 
 type workspaceDebounceMsg uint64
+type workspacePollTickMsg uint64
 
 type workspaceWatcher interface {
 	Updates() <-chan worktree.WatchUpdate
@@ -207,6 +215,7 @@ type Model struct {
 	workspaceCommitSplitRatio      float64
 	workspaceCommitDividerDragging bool
 	workspaceWatchGeneration       uint64
+	workspacePollGeneration        uint64
 	workspaceWatchPending          bool
 	workspaceWatcherErr            error
 	workspaceDebounce              time.Duration
@@ -234,11 +243,14 @@ type Model struct {
 	status        string
 	err           error
 
-	currentVersion  string
-	updateAvailable bool
-	checkUpdate     updateChecker
-	installUpdate   installCommand
-	restartUpdate   restartCommand
+	currentVersion         string
+	aiUsage                []aiusage.Provider
+	aiUsageLimitsLoading   bool
+	aiUsageActivityLoading bool
+	updateAvailable        bool
+	checkUpdate            updateChecker
+	installUpdate          installCommand
+	restartUpdate          restartCommand
 }
 
 type graphNavigationDepth int
@@ -269,6 +281,10 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	comment.SetWidth(66)
 	comment.SetHeight(8)
 	fileFilter := textinput.New()
+	// A blinking input cursor makes Bubble Tea repaint the entire Commit
+	// dashboard twice per blink cycle, which is visibly disruptive for a large
+	// syntax-colored diff panel. Keep local dashboard cursors visible and static.
+	fileFilter.Cursor.SetMode(cursor.CursorStatic)
 	fileFilter.Prompt = "Filter: "
 	fileFilter.Placeholder = "type to filter files"
 	fileFilter.CharLimit = 300
@@ -277,6 +293,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	graphQuery.Placeholder = "type to filter"
 	graphQuery.CharLimit = 300
 	commitMessage := textinput.New()
+	commitMessage.Cursor.SetMode(cursor.CursorStatic)
 	commitMessage.Placeholder = "Commit message"
 	commitMessage.CharLimit = 1000
 	graphFilter := textinput.New()
@@ -340,7 +357,7 @@ func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace
 func NewFilesOnly(workspace *worktree.Client) Model {
 	model := newWithWorkspace(nil, 0, workspace)
 	model.filesOnly = true
-	model.active = workspaceFilesTab
+	model.active = 0
 	watcher, err := worktree.NewWatcher(workspace.Root())
 	if err != nil {
 		model.workspaceWatcherErr = fmt.Errorf("filesystem watcher unavailable (manual refresh remains available): %w", err)
@@ -368,6 +385,7 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceEntryRequest = 1
 	model.workspaceEntryPending = 1
 	model.workspacePreviewRequest = 1
+	model.workspacePollGeneration = 1
 	model.workspaceLoading = true
 	model.workspaceExpanded = make(map[string]bool)
 	model.workspaceLoaded = make(map[string]bool)
@@ -417,8 +435,58 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.workspace != nil {
 		commands = append(commands, commitRemoteTickCmd())
+		if m.workspaceFilesActive() {
+			commands = append(commands, workspacePollTickCmd(m.workspacePollGeneration))
+		}
 	}
 	return tea.Batch(commands...)
+}
+
+func workspacePollTickCmd(generation uint64) tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg { return workspacePollTickMsg(generation) })
+}
+
+func loadAIUsageCmds() tea.Cmd {
+	home, _ := os.UserHomeDir()
+	return tea.Batch(
+		func() tea.Msg { return aiUsageLimitsMsg{aiusage.LoadLimits(home)} },
+		func() tea.Msg { return aiUsageActivityMsg{aiusage.LoadActivity(home)} },
+	)
+}
+
+func mergeAIUsageProviders(current, updates []aiusage.Provider) []aiusage.Provider {
+	providers := append([]aiusage.Provider(nil), current...)
+	for _, update := range updates {
+		index := -1
+		for i := range providers {
+			if providers[i].Name == update.Name {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			providers = append(providers, update)
+			continue
+		}
+		if update.LimitsLoaded {
+			providers[index].Limits = update.Limits
+			providers[index].Notice = update.Notice
+			providers[index].LimitsLoaded = true
+		}
+		if update.ActivityLoaded {
+			providers[index].TotalTokens = update.TotalTokens
+			providers[index].MonthlyTokens = update.MonthlyTokens
+			providers[index].Models = update.Models
+			providers[index].Days = update.Days
+			providers[index].Updated = update.Updated
+			providers[index].ActivityLoaded = true
+		}
+	}
+	return providers
+}
+
+func aiUsageTickCmd() tea.Cmd {
+	return tea.Tick(time.Minute, func(t time.Time) tea.Msg { return aiUsageTickMsg(t) })
 }
 
 func (m Model) checkUpdateCmd() tea.Cmd {
@@ -446,6 +514,8 @@ func (m Model) kind() provider.Kind {
 	return activeKinds[index]
 }
 
+func (m Model) aiUsageActive() bool { return m.active == m.tabCount()-1 }
+
 func (m Model) workspaceKinds() []provider.Kind {
 	if m.remoteErr != nil || m.backend == nil {
 		return localWorkspaceKinds
@@ -458,7 +528,7 @@ func (m Model) localGitList(kind provider.Kind) bool {
 }
 
 func (m Model) localTab() bool {
-	return m.workspace != nil && (m.active < m.localTabCount() || m.filesOnly)
+	return m.workspace != nil && m.active < m.localTabCount()
 }
 
 func (m Model) localTabCount() int {
@@ -469,7 +539,7 @@ func (m Model) localTabCount() int {
 }
 
 func (m Model) workspaceFilesActive() bool {
-	return m.active == workspaceFilesTab || m.filesOnly
+	return m.active == workspaceFilesTab || m.filesOnly && m.active == 0
 }
 
 func (m Model) workspaceCommitActive() bool {
@@ -479,11 +549,11 @@ func (m Model) workspaceCommitActive() bool {
 func (m Model) tabCount() int {
 	if m.workspace != nil {
 		if m.filesOnly {
-			return 1
+			return 2
 		}
-		return len(m.workspaceKinds()) + m.localTabCount()
+		return len(m.workspaceKinds()) + m.localTabCount() + 1
 	}
-	return len(kinds)
+	return len(kinds) + 1
 }
 
 func (m Model) filter() provider.Filter {
@@ -741,6 +811,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case updateResultMsg:
 		m.updateAvailable = msg.available
 		return m, nil
+	case aiUsageLimitsMsg:
+		m.aiUsage = mergeAIUsageProviders(m.aiUsage, msg.providers)
+		m.aiUsageLimitsLoading = false
+		return m, nil
+	case aiUsageActivityMsg:
+		m.aiUsage = mergeAIUsageProviders(m.aiUsage, msg.providers)
+		m.aiUsageActivityLoading = false
+		return m, nil
+	case aiUsageTickMsg:
+		if !m.aiUsageActive() {
+			return m, nil
+		}
+		m.aiUsageLimitsLoading = true
+		m.aiUsageActivityLoading = true
+		return m, tea.Batch(loadAIUsageCmds(), aiUsageTickCmd())
 
 	case installFinishedMsg:
 		if msg.err != nil {
@@ -774,9 +859,33 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.workspaceWatcherErr = fmt.Errorf("filesystem watcher error (manual refresh remains available): %w", msg.err)
 			return m, tea.Batch(commands...)
 		}
+		// A native event for the previewed file can refresh just that file. Other
+		// events (root entries and Git metadata) retain the debounced full reload.
+		if m.workspaceFilesActive() && m.workspaceFile.Path != "" && filepath.Clean(msg.path) == filepath.Join(m.workspace.Root(), filepath.FromSlash(m.workspaceFile.Path)) {
+			m.workspacePreviewRequest++
+			m.workspacePreviewLoading = true
+			commands = append(commands, m.fetchWorkspaceFileCmd(m.workspacePreviewRequest, m.workspaceFile.Path))
+			return m, tea.Batch(commands...)
+		}
 		m.workspaceWatchGeneration++
 		commands = append(commands, workspaceDebounceCmd(m.workspaceWatchGeneration, m.workspaceDebounce))
 		return m, tea.Batch(commands...)
+
+	case workspacePollTickMsg:
+		if uint64(msg) != m.workspacePollGeneration || !m.workspaceFilesActive() {
+			return m, nil
+		}
+		commands := []tea.Cmd{workspacePollTickCmd(m.workspacePollGeneration)}
+		if m.actionBusy {
+			return m, tea.Batch(commands...)
+		}
+		if m.workspaceLoading {
+			m.workspaceWatchPending = true
+			return m, tea.Batch(commands...)
+		}
+		next, refresh := m.startWorkspaceLoad()
+		commands = append(commands, refresh)
+		return next, tea.Batch(commands...)
 
 	case workspaceDebounceMsg:
 		if uint64(msg) != m.workspaceWatchGeneration || !m.localTab() || m.actionBusy {
@@ -955,6 +1064,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = ""
 				return m.startActiveTabLoad()
 			}
+		}
+		if m.aiUsageActive() {
+			switch msg.String() {
+			case "r":
+				m.aiUsageLimitsLoading = true
+				m.aiUsageActivityLoading = true
+				return m, loadAIUsageCmds()
+			case "q":
+				return m, tea.Quit
+			}
+			return m, nil
 		}
 		if m.localTab() {
 			return m.updateWorkspace(msg)
@@ -1151,8 +1271,8 @@ func (m Model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = ""
 			return m.startActiveTabLoad()
 		}
-	case "!", "@", "#", "$", "%", "^", "&", "*":
-		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5, "&": 6, "*": 7}
+	case "!", "@", "#", "$", "%", "^", "&", "*", "(":
+		shiftTabs := map[string]int{"!": 0, "@": 1, "#": 2, "$": 3, "%": 4, "^": 5, "&": 6, "*": 7, "(": 8}
 		if index := shiftTabs[msg.String()]; index < m.tabCount() {
 			m.active = index
 			m.status = ""
@@ -2370,7 +2490,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		focused, cmd := m.focusActiveFilter()
 		return focused, cmd
 	}
-	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+	if m.screen == listScreen && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && !m.workspaceCommitActive() {
 		m = m.blurInteractiveInputs()
 		if m.localTab() {
 			m.focus = focusWorkspaceList
@@ -2383,6 +2503,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.localTab() {
 		if m.workspaceCommitActive() {
 			leftPanelWidth, buttonY, changesTop := m.commitDashboardGeometry()
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+				// Keep the geometry from the rendered, focused composer. Blurring can
+				// remove a cursor-only wrapped row and move every panel below it.
+				m = m.blurInteractiveInputs()
+			}
 			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X >= leftPanelWidth && msg.X <= leftPanelWidth+1 && msg.Y >= 6 && msg.Y < m.height-3 {
 				m.workspaceDividerDragging = true
 				return m, nil
@@ -2392,19 +2517,25 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 				m.workspaceCommitDividerDragging = true
 				return m, nil
 			}
-			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && msg.X == leftPanelWidth-1 {
+			if msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress && (msg.X == leftPanelWidth-1 || msg.X == leftPanelWidth-3) {
 				stagedRow := msg.Y - (buttonY + 3)
 				stagedChanges := m.dashboardPanelChanges(true)
 				stagedHeight := changesTop - (buttonY + 2)
 				stagedRow += m.dashboardPanelStart(true, stagedHeight)
-				if stagedRow >= 0 && stagedRow < len(stagedChanges) && !stagedChanges[stagedRow].isDir {
+				if stagedRow >= 0 && stagedRow < len(stagedChanges) {
+					if msg.X == leftPanelWidth-3 {
+						return m.startWorkspacePathRevert(stagedChanges[stagedRow].displayPath())
+					}
 					return m.startWorkspacePathStage(stagedChanges[stagedRow].displayPath(), true)
 				}
 				changes := m.dashboardPanelChanges(false)
 				changesRow := msg.Y - (changesTop + 1)
 				changesHeight := max(0, m.height-3-changesTop)
 				changesRow += m.dashboardPanelStart(false, changesHeight)
-				if changesRow >= 0 && changesRow < len(changes) && !changes[changesRow].isDir {
+				if changesRow >= 0 && changesRow < len(changes) {
+					if msg.X == leftPanelWidth-3 {
+						return m.startWorkspacePathRevert(changes[changesRow].displayPath())
+					}
 					return m.startWorkspacePathStage(changes[changesRow].displayPath(), false)
 				}
 			}
@@ -2826,7 +2957,7 @@ func (m Model) tabLabels() []string {
 	if m.workspace != nil {
 		labels = append(labels, "Commit", "Files")
 		if m.filesOnly {
-			return []string{"Files"}
+			return []string{"Files", "AI Usage"}
 		}
 		activeKinds = m.workspaceKinds()
 	}
@@ -2840,6 +2971,7 @@ func (m Model) tabLabels() []string {
 		}
 		labels = append(labels, name)
 	}
+	labels = append(labels, "AI Usage")
 	return labels
 }
 

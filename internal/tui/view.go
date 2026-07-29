@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/SKAIBlue/zzam-tiger/internal/aiusage"
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 	"github.com/SKAIBlue/zzam-tiger/internal/worktree"
 )
@@ -54,6 +55,7 @@ var (
 	disabledButtonStyle        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#6B7280"))
 	stageArrowStyle            = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#E5C07B"))
 	unstageArrowStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(lipgloss.Color("#61AFEF"))
+	revertArrowStyle           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#E06C75"))
 	updateButtonStyle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(green).Padding(0, 1)
 	headerBrandStyle           = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(headerPurple).Padding(0, 1)
 	headerVersionStyle         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#DCE7FF")).Background(headerBlue).Padding(0, 1)
@@ -64,6 +66,9 @@ var (
 )
 
 func (m Model) View() string {
+	if m.aiUsageActive() {
+		return m.aiUsageView()
+	}
 	if m.width == 0 || m.height == 0 {
 		return "Starting Zzam Tiger…"
 	}
@@ -190,6 +195,210 @@ func (m Model) listView() string {
 	lines = append(lines, m.statusLine())
 	lines = append(lines, metaStyle.Render(truncate(m.listHelp(), m.width)))
 	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func (m Model) aiUsageView() string {
+	lines := []string{m.headerView("  AI Usage"), m.tabsView()}
+	contentStart := len(lines)
+	if len(m.aiUsage) == 0 && (m.aiUsageLimitsLoading || m.aiUsageActivityLoading) {
+		lines = append(lines, metaStyle.Render(" Loading AI usage…"))
+	} else if len(m.aiUsage) == 0 {
+		lines = append(lines, metaStyle.Render(" No supported AI credentials found."))
+	} else {
+		for _, usage := range m.aiUsage {
+			rows := []string{}
+			totalRows := []string{}
+			if usage.ActivityLoaded {
+				totalRows = append(totalRows, fmt.Sprintf(" Total tokens  Total %s  This month %s", formatTokenCount(usage.TotalTokens), formatTokenCount(usage.MonthlyTokens)))
+				totalCost, monthlyCost, complete := aiusage.EstimatedCosts(usage.Models)
+				qualifier := ""
+				if !complete {
+					qualifier = "  partial"
+				}
+				totalRows = append(totalRows, fmt.Sprintf(" Est. API cost  Total %s  This month %s%s", formatUSDCost(totalCost), formatUSDCost(monthlyCost), qualifier))
+				totalRows = append(totalRows, metaStyle.Render(" Paid API equivalent · pricing "+aiusage.PriceEffectiveDate()))
+			} else {
+				totalRows = append(totalRows, metaStyle.Render(" Total tokens  Collecting…"))
+			}
+			rows = appendUsageSection(rows, totalRows)
+			rows = appendUsageSection(rows, modelUsageTableRows(usage.Models, m.width-6))
+
+			limitRows := []string{}
+			if !usage.LimitsLoaded {
+				limitRows = append(limitRows, metaStyle.Render(" Loading subscription limits…"))
+			} else if len(usage.Limits) == 0 {
+				notice := usage.Notice
+				if notice == "" {
+					notice = "Limit data is not available for this account"
+				}
+				limitRows = append(limitRows, metaStyle.Render(" "+notice))
+			} else {
+				for _, limit := range usage.Limits {
+					reset := "unknown"
+					if !limit.Reset.IsZero() {
+						reset = limit.Reset.Local().Format("Jan 02 15:04")
+					}
+					limitRows = append(limitRows, fmt.Sprintf(" %-8s %s %5.1f%%  Reset %s", limit.Label, usageGauge(limit.Used, 18), limit.Used, reset))
+				}
+			}
+			if len(usage.Limits) > 0 && usage.Notice != "" {
+				limitRows = append(limitRows, metaStyle.Render(" "+usage.Notice))
+			}
+			rows = appendUsageSection(rows, limitRows)
+
+			activityRows := []string{sectionTitleStyle.Render(" Activity")}
+			if usage.ActivityLoaded {
+				activityRows = append(activityRows, usageGrassRows(usage.Days, max(20, m.width-8), time.Now())...)
+			} else {
+				activityRows = append(activityRows, metaStyle.Render(" Collecting activity…"))
+			}
+			rows = appendUsageSection(rows, activityRows)
+			if !usage.Updated.IsZero() {
+				rows = appendUsageSection(rows, []string{metaStyle.Render(" Updated     " + usage.Updated.Local().Format("2006-01-02 15:04"))})
+			}
+			lines = append(lines, strings.Split(contentPanel(usage.Name, rows, m.width-2, len(rows)+2, false), "\n")...)
+		}
+	}
+	for renderedLineCount(lines) < m.height-3 {
+		lines = append(lines, "")
+	}
+	lines = append(lines[:contentStart], append(contentBoxRows(lines[contentStart:], m.width), contentBoxBottom(m.width))...)
+	lines = append(lines, m.statusLine(), metaStyle.Render(" ←/→ tabs · r refresh · q quit"))
+	return strings.Join(lines[:min(len(lines), m.height)], "\n")
+}
+
+func appendUsageSection(rows, section []string) []string {
+	if len(section) == 0 {
+		return rows
+	}
+	if len(rows) > 0 {
+		rows = append(rows, "")
+	}
+	return append(rows, section...)
+}
+
+func modelUsageTableRows(models []aiusage.ModelUsage, width int) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	modelWidth := 30
+	for _, model := range models {
+		modelWidth = max(modelWidth, lipgloss.Width(model.Model))
+	}
+	// Leave room for the period, three token counts, and one cost column.
+	modelWidth = min(modelWidth, max(18, width-54))
+	row := func(model, period, input, cached, output, cost string) string {
+		return fmt.Sprintf(" %-*s  %-7s  %9s  %9s  %9s  %9s", modelWidth, truncate(model, modelWidth), period, input, cached, output, cost)
+	}
+	divider := row(strings.Repeat("─", modelWidth), "───────", "─────────", "─────────", "─────────", "─────────")
+	rows := []string{
+		sectionTitleStyle.Render(row("Model", "Period", "Input", "Cached", "Output", "Cost")),
+		metaStyle.Render(divider),
+	}
+	for index, model := range models {
+		if index > 0 {
+			rows = append(rows, metaStyle.Render(divider))
+		}
+		totalCost, totalKnown := model.EstimatedCost(false)
+		monthlyCost, monthlyKnown := model.EstimatedCost(true)
+		totalLabel, monthlyLabel := "—", "—"
+		if totalKnown {
+			totalLabel = formatUSDCost(totalCost)
+		}
+		if monthlyKnown {
+			monthlyLabel = formatUSDCost(monthlyCost)
+		}
+		rows = append(rows,
+			row(model.Model, "Total", formatTokenCount(model.Input), formatTokenCount(model.Cached), formatTokenCount(model.Output), totalLabel),
+			row("", "Month", formatTokenCount(model.MonthlyInput), formatTokenCount(model.MonthlyCached), formatTokenCount(model.MonthlyOutput), monthlyLabel),
+		)
+	}
+	return rows
+}
+
+func formatUSDCost(cost float64) string {
+	if cost < .01 && cost > 0 {
+		return fmt.Sprintf("$%.4f", cost)
+	}
+	return fmt.Sprintf("$%.2f", cost)
+}
+
+func usageGauge(percent float64, width int) string {
+	percent = min(100, max(0, percent))
+	filled := int(percent*float64(width)/100 + .5)
+	return lipgloss.NewStyle().Foreground(green).Render(strings.Repeat("█", filled)) + metaStyle.Render(strings.Repeat("░", width-filled))
+}
+
+func usageGrassRows(days []aiusage.Day, width int, now time.Time) []string {
+	const labelWidth, cellWidth = 5, 5
+	weeks := max(1, (width-labelWidth)/cellWidth)
+	byDate := map[string]int64{}
+	var peak int64
+	for _, d := range days {
+		byDate[d.Date] = d.Tokens
+		if d.Tokens > peak {
+			peak = d.Tokens
+		}
+	}
+	styles := []lipgloss.Style{
+		lipgloss.NewStyle().Foreground(border), lipgloss.NewStyle().Foreground(lipgloss.Color("#24543A")),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("#2E7D4F")), lipgloss.NewStyle().Foreground(green),
+	}
+	endWeek := beginningOfUsageWeek(now)
+	startWeek := endWeek.AddDate(0, 0, -7*(weeks-1))
+	header := strings.Repeat(" ", labelWidth)
+	for column := 0; column < weeks; column++ {
+		week := startWeek.AddDate(0, 0, column*7)
+		marker := fmt.Sprintf("%d", week.Day())
+		if column == 0 || week.Month() != week.AddDate(0, 0, -7).Month() {
+			marker = fmt.Sprintf("%d/%d", int(week.Month()), week.Day())
+		}
+		alignment := lipgloss.Center
+		if column == 0 {
+			alignment = lipgloss.Left
+		}
+		header += lipgloss.NewStyle().Width(cellWidth).Align(alignment).Render(marker)
+	}
+	rows := []string{metaStyle.Render(header)}
+	dayLabels := []string{"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"}
+	for weekday := 0; weekday < 7; weekday++ {
+		row := lipgloss.NewStyle().Width(labelWidth).Render(dayLabels[weekday])
+		for column := 0; column < weeks; column++ {
+			date := startWeek.AddDate(0, 0, column*7+weekday)
+			if date.After(now) {
+				row += strings.Repeat(" ", cellWidth)
+				continue
+			}
+			n := byDate[date.Format("2006-01-02")]
+			level := 0
+			if peak > 0 && n > 0 {
+				level = 1 + int(n*2/peak)
+			}
+			cell := styles[min(3, level)].Render("■")
+			row += lipgloss.NewStyle().Width(cellWidth).Align(lipgloss.Center).Render(cell)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func beginningOfUsageWeek(value time.Time) time.Time {
+	local := value.In(value.Location())
+	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, local.Location())
+	return day.AddDate(0, 0, -int(day.Weekday()))
+}
+
+func formatTokenCount(value int64) string {
+	if value >= 1_000_000_000 {
+		return fmt.Sprintf("%.2fB", float64(value)/1e9)
+	}
+	if value >= 1_000_000 {
+		return fmt.Sprintf("%.2fM", float64(value)/1e6)
+	}
+	if value >= 1_000 {
+		return fmt.Sprintf("%.1fK", float64(value)/1e3)
+	}
+	return fmt.Sprintf("%d", value)
 }
 
 func (m Model) workspaceCommitDashboard(lines []string) string {
@@ -486,11 +695,18 @@ func (m Model) changePanel(title string, staged bool, width, height int) string 
 				marker = "▸ "
 				icon = renderDirectoryIcon(false)
 			}
-			label := indent + marker + icon + " " + path
-			if m.dashboardChangeSelected(item) {
-				label = selectedRow.Copy().Width(innerWidth).Render(truncate(ansi.Strip(label), innerWidth))
+			arrow := stageArrowStyle.Render("↑")
+			if staged {
+				arrow = unstageArrowStyle.Render("↓")
 			}
-			rows = append(rows, panelRow(label, width, focused))
+			actions := revertArrowStyle.Render("↶") + " " + arrow
+			label := indent + marker + icon + " " + path
+			label = lipgloss.NewStyle().Width(max(1, innerWidth-3)).Render(truncate(label, max(1, innerWidth-3)))
+			row := label + actions
+			if m.dashboardChangeSelected(item) {
+				row = selectedRow.Copy().Width(max(1, innerWidth-3)).Render(ansi.Strip(label)) + actions
+			}
+			rows = append(rows, panelRow(row, width, focused))
 			continue
 		}
 		arrow := stageArrowStyle.Render("↑")
@@ -498,10 +714,11 @@ func (m Model) changePanel(title string, staged bool, width, height int) string 
 			arrow = unstageArrowStyle.Render("↓")
 		}
 		label := fmt.Sprintf("%s %c %s %s", indent, item.change.Code, renderWorkspaceFileIcon(item.path), path)
-		label = lipgloss.NewStyle().Width(max(1, innerWidth-1)).Render(truncate(label, max(1, innerWidth-1)))
-		row := label + arrow
+		actions := revertArrowStyle.Render("↶") + " " + arrow
+		label = lipgloss.NewStyle().Width(max(1, innerWidth-3)).Render(truncate(label, max(1, innerWidth-3)))
+		row := label + actions
 		if m.dashboardChangeSelected(item) {
-			row = selectedRow.Copy().Width(max(1, innerWidth-1)).Render(ansi.Strip(label)) + arrow
+			row = selectedRow.Copy().Width(max(1, innerWidth-3)).Render(ansi.Strip(label)) + actions
 		}
 		rows = append(rows, panelRow(row, width, focused))
 	}
