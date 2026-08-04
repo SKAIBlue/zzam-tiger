@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 	focusListSearch
 	focusListFilters
 	focusListItems
+	focusDetailFiles
 )
 
 const (
@@ -228,19 +230,22 @@ type Model struct {
 	workspaceWatcherErr            error
 	workspaceDebounce              time.Duration
 
-	commentMode      commentMode
-	commentItem      provider.Item
-	commentKind      provider.Kind
-	commentTarget    provider.ReviewTarget
-	commentTargetSet bool
-	commentThread    provider.ReviewThreadTarget
-	commentOrigin    screen
-	diffFile         int
-	diffLine         int
-	diffAnchor       int
-	diffDragging     bool
-	detailDiffActive bool
-	selectedReview   int
+	commentMode           commentMode
+	commentItem           provider.Item
+	commentKind           provider.Kind
+	commentTarget         provider.ReviewTarget
+	commentTargetSet      bool
+	commentThread         provider.ReviewThreadTarget
+	commentOrigin         screen
+	diffFile              int
+	diffLine              int
+	diffAnchor            int
+	diffDragging          bool
+	detailDiffActive      bool
+	detailFileOffset      int
+	detailSidebarWidth    int
+	detailSidebarDragging bool
+	selectedReview        int
 
 	listRequest   uint64
 	detailRequest uint64
@@ -805,7 +810,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.graphDragging = false
 		m.workspaceDividerDragging = false
 		m.workspaceCommitDividerDragging = false
+		m.detailSidebarDragging = false
 		m.resizeViewport()
+		m.clampDetailFileOffset()
 		if m.screen == diffScreen || m.commentUsesDiffBackground() {
 			m.setDiffContent()
 		} else if m.detail.Item.ID != "" {
@@ -957,7 +964,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.detail = msg.detail
 		m.selected = msg.detail.Item
+		m.resizeViewport()
 		m.clampDiffSelection()
+		m.clampDetailFileOffset()
 		if m.screen == diffScreen || m.commentUsesDiffBackground() {
 			m.setDiffContent()
 		} else {
@@ -1570,6 +1579,9 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	kind := m.currentDetailKind()
+	if next, cmd, handled := m.updateDetailFocus(msg); handled {
+		return next, cmd
+	}
 	if kind == provider.Milestones && m.detailReady() {
 		switch msg.String() {
 		case "left", "h":
@@ -1693,6 +1705,53 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// updateDetailFocus mirrors the two-pane Commit tab: directional navigation
+// crosses between the file list and detail pane, while vertical movement in
+// the list selects a file and scrolls its diff into view.
+func (m Model) updateDetailFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	if !m.detailFilesSidebarVisible() {
+		return m, nil, false
+	}
+	switch m.focus {
+	case focusDetailFiles:
+		switch msg.String() {
+		case "tab", "right", "l":
+			m.focus = focusListItems
+			m.status = ""
+			return m, nil, true
+		case "up", "k":
+			if m.diffFile <= 0 {
+				m.focus = focusListItems
+				m.status = ""
+				return m, nil, true
+			}
+			m.selectDetailFile(m.diffFile - 1)
+			return m, nil, true
+		case "down", "j":
+			m.selectDetailFile(m.diffFile + 1)
+			return m, nil, true
+		case "home", "g":
+			m.selectDetailFile(0)
+			return m, nil, true
+		case "end", "G":
+			m.selectDetailFile(len(m.detail.Diffs) - 1)
+			return m, nil, true
+		case "enter", " ":
+			m.scrollDetailToFile(m.diffFile)
+			return m, nil, true
+		}
+	case focusListItems:
+		switch msg.String() {
+		case "tab", "left", "h":
+			m.focus = focusDetailFiles
+			m.clampDetailFileOffset()
+			m.status = "files focused"
+			return m, nil, true
+		}
+	}
+	return m, nil, false
 }
 
 func (m Model) updateDiff(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2099,6 +2158,8 @@ func (m Model) openSelected() (tea.Model, tea.Cmd) {
 	m.milestoneIssueFilter, m.milestoneIssueCursor = 0, 0
 	m.viewport.SetContent("")
 	m.diffFile, m.diffLine, m.diffAnchor = 0, -1, -1
+	m.detailFileOffset = 0
+	m.focus = focusListItems
 	m.screen = detailScreen
 	m.viewport.GotoTop()
 	m.loadingDetail = false
@@ -2163,6 +2224,9 @@ func (m *Model) resizeViewport() {
 	// Boxes account for their own borders. Use the reported terminal width so
 	// full-width detail and diff boxes do not extend into an extra column.
 	width := m.width
+	if m.detailFilesSidebarVisible() {
+		width -= m.detailFilesSidebarWidth() + 1
+	}
 	height := m.height - 5
 	if width < 20 {
 		width = 20
@@ -2195,7 +2259,176 @@ func (m *Model) setDetailContent() {
 	if diffCommentableKind(m.currentDetailKind()) && len(m.detail.Diffs) == 0 {
 		content += "\n" + detailBoxStyle.Width(max(12, m.viewport.Width-2)).Render(sectionTitleStyle.Render("Diff")+"\n"+metaStyle.Render("No patch was provided for this change."))
 	}
+	// Keep enough trailing space for every changed-file target, including the
+	// final one, to align its diff box with the top of the viewport.
+	if m.detailFilesSidebarVisible() {
+		content += strings.Repeat("\n", max(0, m.viewport.Height-1))
+	}
 	m.viewport.SetContent(content)
+}
+
+func (m Model) detailFilesSidebarVisible() bool {
+	return m.screen == detailScreen && m.currentDetailKind() == provider.PullRequests && len(m.detail.Diffs) > 0 && m.width >= 70
+}
+
+func (m Model) detailFilesSidebarWidth() int {
+	width := m.detailSidebarWidth
+	if width == 0 {
+		width = min(30, max(24, m.width/4))
+	}
+	return min(m.detailFilesSidebarMaxWidth(), max(20, width))
+}
+
+func (m Model) detailFilesSidebarMaxWidth() int {
+	return max(20, m.width-32)
+}
+
+func (m Model) detailFilesVisibleRows() int {
+	return max(1, m.viewport.Height-3)
+}
+
+func (m *Model) clampDetailFileOffset() {
+	rows := detailFileTreeRows(m.detail.Diffs)
+	if len(rows) == 0 {
+		m.detailFileOffset = 0
+		return
+	}
+	if m.detailFileOffset < 0 {
+		m.detailFileOffset = 0
+	}
+	maxOffset := max(0, len(rows)-m.detailFilesVisibleRows())
+	if m.detailFileOffset > maxOffset {
+		m.detailFileOffset = maxOffset
+	}
+	selectedRow := detailFileTreeRowForFile(rows, m.diffFile)
+	if selectedRow < 0 {
+		return
+	}
+	if selectedRow < m.detailFileOffset {
+		m.detailFileOffset = selectedRow
+	}
+	if selectedRow >= m.detailFileOffset+m.detailFilesVisibleRows() {
+		m.detailFileOffset = selectedRow - m.detailFilesVisibleRows() + 1
+	}
+}
+
+type detailFileTreeRow struct {
+	path  string
+	name  string
+	depth int
+	file  int
+	isDir bool
+}
+
+type detailFileTreeNode struct {
+	dirs  map[string]*detailFileTreeNode
+	files map[string]int
+}
+
+func detailFileTreeRows(diffs []provider.DiffFile) []detailFileTreeRow {
+	root := &detailFileTreeNode{dirs: make(map[string]*detailFileTreeNode), files: make(map[string]int)}
+	for index, file := range diffs {
+		path := diffPath(file)
+		parts := strings.Split(path, "/")
+		node := root
+		for _, part := range parts[:max(0, len(parts)-1)] {
+			if node.dirs[part] == nil {
+				node.dirs[part] = &detailFileTreeNode{dirs: make(map[string]*detailFileTreeNode), files: make(map[string]int)}
+			}
+			node = node.dirs[part]
+		}
+		name := path
+		if len(parts) > 0 {
+			name = parts[len(parts)-1]
+		}
+		node.files[name] = index
+	}
+	rows := make([]detailFileTreeRow, 0, len(diffs))
+	var appendNode func(*detailFileTreeNode, string, int)
+	appendNode = func(node *detailFileTreeNode, parent string, depth int) {
+		dirs := make([]string, 0, len(node.dirs))
+		for name := range node.dirs {
+			dirs = append(dirs, name)
+		}
+		sort.Strings(dirs)
+		for _, name := range dirs {
+			path := name
+			if parent != "" {
+				path = parent + "/" + name
+			}
+			rows = append(rows, detailFileTreeRow{path: path, name: name, depth: depth, file: -1, isDir: true})
+			appendNode(node.dirs[name], path, depth+1)
+		}
+		files := make([]string, 0, len(node.files))
+		for name := range node.files {
+			files = append(files, name)
+		}
+		sort.Strings(files)
+		for _, name := range files {
+			path := name
+			if parent != "" {
+				path = parent + "/" + name
+			}
+			rows = append(rows, detailFileTreeRow{path: path, name: name, depth: depth, file: node.files[name]})
+		}
+	}
+	appendNode(root, "", 0)
+	return rows
+}
+
+func detailFileTreeRowForFile(rows []detailFileTreeRow, file int) int {
+	for index, row := range rows {
+		if row.file == file {
+			return index
+		}
+	}
+	return -1
+}
+
+func (m *Model) selectDetailFile(index int) {
+	if index < 0 || index >= len(m.detail.Diffs) {
+		return
+	}
+	m.diffFile = index
+	m.diffLine, m.diffAnchor = -1, -1
+	m.diffDragging = false
+	m.detailDiffActive = false
+	m.selectedReview = -1
+	m.clampDetailFileOffset()
+	m.scrollDetailToFile(index)
+}
+
+func (m *Model) scrollDetailToFile(index int) {
+	if index < 0 || index >= len(m.detail.Diffs) {
+		return
+	}
+	m.setDetailContent()
+	if row := detailFileHeaderRow(m.detail, m.viewport.Width, index); row >= 0 {
+		m.viewport.SetYOffset(max(0, row-2))
+	}
+}
+
+func detailFileHeaderRow(detail provider.Detail, width, index int) int {
+	if index < 0 || index >= len(detail.Diffs) {
+		return -1
+	}
+	content, _ := renderDetailLayout(detail, width, -1, -1, -1, -1)
+	header := sectionTitleStyle.Render(diffPath(detail.Diffs[index]))
+	for row, line := range strings.Split(content, "\n") {
+		if strings.Contains(line, header) {
+			return row
+		}
+	}
+	return -1
+}
+
+func (m *Model) resizeDetailFilesSidebar(x int) {
+	m.detailSidebarWidth = min(m.detailFilesSidebarMaxWidth(), max(20, x))
+	offset := m.viewport.YOffset
+	m.resizeViewport()
+	m.clampDetailFileOffset()
+	m.setDetailContent()
+	m.viewport.SetYOffset(offset)
 }
 
 func (m *Model) ensureMilestoneIssueVisible() {
@@ -2670,6 +2903,18 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.detailSidebarDragging {
+		switch msg.Action {
+		case tea.MouseActionRelease:
+			m.detailSidebarDragging = false
+			return m, nil
+		case tea.MouseActionMotion:
+			m.resizeDetailFilesSidebar(msg.X)
+			return m, nil
+		case tea.MouseActionPress:
+			m.detailSidebarDragging = false
+		}
+	}
 	if m.graphDragging {
 		switch msg.Action {
 		case tea.MouseActionRelease:
@@ -2880,6 +3125,24 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.loadSelectedWorkspaceItem()
 		}
 		return m, nil
+	}
+	if m.screen == detailScreen && m.detailFilesSidebarVisible() && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
+		sidebarWidth := m.detailFilesSidebarWidth()
+		if msg.X >= sidebarWidth-1 && msg.X <= sidebarWidth+1 && msg.Y >= 2 && msg.Y < 2+m.viewport.Height {
+			m.detailSidebarDragging = true
+			return m, nil
+		}
+		if msg.X < sidebarWidth {
+			// The sidebar begins after the detail header and metadata rows; its first
+			// file row follows the panel border and title.
+			rows := detailFileTreeRows(m.detail.Diffs)
+			index := m.detailFileOffset + msg.Y - 4
+			if index >= 0 && index < len(rows) && rows[index].file >= 0 {
+				m.focus = focusDetailFiles
+				m.selectDetailFile(rows[index].file)
+			}
+			return m, nil
+		}
 	}
 	if m.screen == detailScreen && m.currentDetailKind() == provider.Milestones && msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress {
 		base, _ := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, -1, -1, m.selectedReview)

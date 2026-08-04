@@ -1641,12 +1641,27 @@ func (m Model) detailView() string {
 		}
 		lines = append(lines, strings.Join(failure[:m.viewport.Height], "\n"))
 	} else {
-		lines = append(lines, m.viewport.View())
+		body := m.viewport.View()
+		if m.detailFilesSidebarVisible() {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, m.detailFilesSidebar(), " ", body)
+		}
+		lines = append(lines, body)
 	}
 	lines = append(lines, m.statusLine())
 	help := " ↑/↓ or wheel scroll · Esc back · r refresh"
+	if m.detailFilesSidebarVisible() {
+		if m.focus == focusDetailFiles {
+			help = " Changed files focused · ↑/↓ select · → detail · Enter jump · Esc back"
+		} else {
+			help += " · ← files"
+		}
+	}
 	if kind == provider.PullRequests {
-		help += " · D diff · R review · N comment · M merge"
+		if m.detailFilesSidebarVisible() {
+			help += " · Tab files · drag divider resize · D diff · R review · N comment · M merge"
+		} else {
+			help += " · D diff · R review · N comment · M merge"
+		}
 	}
 	if kind == provider.Commits {
 		help += " · D diff · N comment"
@@ -1671,6 +1686,42 @@ func (m Model) detailView() string {
 		return placeOverlay(m.width, m.height, modal, view)
 	}
 	return view
+}
+
+func (m Model) detailFilesSidebar() string {
+	width := m.detailFilesSidebarWidth()
+	rows := make([]string, 0, m.detailFilesVisibleRows()+1)
+	rows = append(rows, sectionTitleStyle.Render(fmt.Sprintf("Changed files (%d)", len(m.detail.Diffs))))
+	tree := detailFileTreeRows(m.detail.Diffs)
+	for row := 0; row < m.detailFilesVisibleRows(); row++ {
+		index := m.detailFileOffset + row
+		if index >= len(tree) {
+			rows = append(rows, "")
+			continue
+		}
+		item := tree[index]
+		indent := strings.Repeat("  ", item.depth)
+		if item.isDir {
+			rows = append(rows, metaStyle.Render(truncate(indent+"▾ "+item.name, max(8, width-4))))
+			continue
+		}
+		label := truncate(indent+"  "+item.name, max(8, width-4))
+		if item.file == m.diffFile {
+			style := selectedRow
+			if m.focus == focusDetailFiles {
+				style = style.Copy().Bold(true)
+			}
+			label = style.Render("›" + label)
+		} else {
+			label = metaStyle.Render(label)
+		}
+		rows = append(rows, label)
+	}
+	style := detailBoxStyle
+	if m.focus == focusDetailFiles {
+		style = style.Copy().BorderForeground(accent)
+	}
+	return style.Width(width - 2).Height(m.viewport.Height - 2).Render(strings.Join(rows, "\n"))
 }
 
 func (m Model) diffView() string {

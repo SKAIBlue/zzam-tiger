@@ -946,18 +946,113 @@ func TestDetailBoxWrapsDiffBeforeTerminalAndKeepsContinuationGutter(t *testing.T
 	}
 }
 
-func TestResizeKeepsDiffBoxFlushWithTerminalEdge(t *testing.T) {
+func TestResizeKeepsDetailDiffBoxWithinContentPane(t *testing.T) {
 	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(Model)
-	if m.viewport.Width != 80 {
-		t.Fatalf("viewport width = %d, want terminal width", m.viewport.Width)
+	wantWidth := 80 - m.detailFilesSidebarWidth() - 1
+	if m.viewport.Width != wantWidth {
+		t.Fatalf("viewport width = %d, want content pane width %d", m.viewport.Width, wantWidth)
 	}
 	m.setDetailContent()
 	for _, line := range strings.Split(m.viewport.View(), "\n") {
-		if strings.HasPrefix(ansi.Strip(line), "╭") && lipgloss.Width(line) != 80 {
-			t.Fatalf("diff/detail box width = %d, want 80: %q", lipgloss.Width(line), ansi.Strip(line))
+		if strings.HasPrefix(ansi.Strip(line), "╭") && lipgloss.Width(line) != wantWidth {
+			t.Fatalf("diff/detail box width = %d, want content pane width %d: %q", lipgloss.Width(line), wantWidth, ansi.Strip(line))
 		}
+	}
+}
+
+func TestPRDetailChangedFilesSidebarSelectsAndScrolls(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	for line := 0; line < 30; line++ {
+		m.detail.Diffs[0].Lines = append(m.detail.Diffs[0].Lines, provider.DiffLine{NewLine: 10 + line, Text: "+additional context"})
+	}
+	m.resizeViewport()
+	m.setDetailContent()
+	if !m.detailFilesSidebarVisible() || !strings.Contains(ansi.Strip(m.View()), "Changed files (3)") {
+		t.Fatalf("changed-files sidebar was not rendered: %q", m.View())
+	}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.focus != focusDetailFiles || m.diffFile != 1 || m.viewport.YOffset == 0 {
+		t.Fatalf("sidebar navigation did not select and scroll to the second file: focus=%v file=%d offset=%d", m.focus, m.diffFile, m.viewport.YOffset)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.diffFile != 0 {
+		t.Fatalf("sidebar click selected file %d, want 0", m.diffFile)
+	}
+	for _, line := range strings.Split(m.View(), "\n") {
+		if width := lipgloss.Width(line); width > m.width {
+			t.Fatalf("sidebar detail row width = %d, terminal width = %d: %q", width, m.width, ansi.Strip(line))
+		}
+	}
+}
+
+func TestPRDetailSidebarUsesTwoPaneKeyboardFocus(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	m.focus = focusListItems
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+	if m.focus != focusDetailFiles {
+		t.Fatalf("left from detail focus=%v, want changed files", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.focus != focusListItems {
+		t.Fatalf("right from changed files focus=%v, want detail", m.focus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.focus != focusListItems {
+		t.Fatalf("up at first changed file focus=%v, want detail", m.focus)
+	}
+}
+
+func TestPRDetailSidebarAlignsSelectedFileWithViewportTop(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	headerRow := detailFileHeaderRow(m.detail, m.viewport.Width, 2)
+	if headerRow < 0 {
+		t.Fatal("last diff top row was not rendered")
+	}
+	wantOffset := max(0, headerRow-2)
+	m.selectDetailFile(2)
+	if m.viewport.YOffset != wantOffset {
+		t.Fatalf("selected file offset = %d, want file header row %d", m.viewport.YOffset, wantOffset)
+	}
+	visibleRows := ansi.Strip(m.viewport.View())
+	if !strings.Contains(visibleRows, "mixed.go") {
+		t.Fatalf("selected file header is not visible: %q", visibleRows)
+	}
+}
+
+func TestPRDetailChangedFilesSidebarRendersTreeAndResizes(t *testing.T) {
+	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
+	m.detail.Diffs[0].NewPath = "cmd/zt/main.go"
+	m.detail.Diffs[1].NewPath = "internal/tui/model.go"
+	m.detail.Diffs[2].NewPath = "README.md"
+	m.resizeViewport()
+	m.setDetailContent()
+	view := ansi.Strip(m.View())
+	for _, want := range []string{"▾ cmd", "▾ zt", "main.go", "▾ internal", "▾ tui", "model.go", "README.md"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("tree sidebar missing %q: %q", want, view)
+		}
+	}
+	initialWidth := m.detailFilesSidebarWidth()
+	initialContentWidth := m.viewport.Width
+	updated, _ := m.Update(tea.MouseMsg{X: initialWidth, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.MouseMsg{X: initialWidth + 6, Y: 4, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.MouseMsg{X: initialWidth + 6, Y: 4, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	m = updated.(Model)
+	if m.detailSidebarDragging || m.detailFilesSidebarWidth() != initialWidth+6 || m.viewport.Width >= initialContentWidth {
+		t.Fatalf("sidebar resize failed: dragging=%t width=%d content=%d", m.detailSidebarDragging, m.detailFilesSidebarWidth(), m.viewport.Width)
 	}
 }
 
@@ -1129,6 +1224,8 @@ func readyDetailModel(backend provider.Provider, kind provider.Kind) Model {
 		},
 	}
 	m.loadingDetail = false
+	m.diffFile = 0
+	m.resizeViewport()
 	m.setDetailContent()
 	return m
 }
@@ -1530,6 +1627,13 @@ func detailHitScreenY(m *Model, hit diffHitRegion) int {
 	return 2 + hit.Row - m.viewport.YOffset
 }
 
+func detailMainX(m Model) int {
+	if m.detailFilesSidebarVisible() {
+		return m.detailFilesSidebarWidth() + 3
+	}
+	return 12
+}
+
 func findDetailHit(t *testing.T, m Model, file, line, review int) diffHitRegion {
 	t.Helper()
 	_, hits := renderDetailLayout(m.detail, m.viewport.Width, m.diffFile, m.diffLine, m.diffAnchor, m.selectedReview)
@@ -1546,9 +1650,10 @@ func TestDetailDiffClickOpensDedicatedDiffAtClickedLine(t *testing.T) {
 	m := readyDetailModel(fakeProvider{}, provider.PullRequests)
 	hit := findDetailHit(t, m, 1, 0, -1)
 	y := detailHitScreenY(&m, hit)
-	updated, _ := m.Update(tea.MouseMsg{X: 12, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	x := detailMainX(m)
+	updated, _ := m.Update(tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(Model)
-	updated, _ = m.Update(tea.MouseMsg{X: 12, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	updated, _ = m.Update(tea.MouseMsg{X: x, Y: y, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
 	m = updated.(Model)
 	if m.screen != diffScreen || m.diffFile != 1 || m.diffLine != 0 {
 		t.Fatalf("detail diff click opened screen=%v file=%d line=%d", m.screen, m.diffFile, m.diffLine)
@@ -1562,10 +1667,11 @@ func TestDetailDiffDragOpensMultilineComposerWithHighlightedRange(t *testing.T) 
 	m.viewport.SetYOffset(max(0, start.Row-3))
 	startY := 2 + start.Row - m.viewport.YOffset
 	endY := 2 + end.Row - m.viewport.YOffset
+	x := detailMainX(m)
 	for _, event := range []tea.MouseMsg{
-		{X: 12, Y: startY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
-		{X: 12, Y: endY, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
-		{X: 12, Y: endY, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease},
+		{X: x, Y: startY, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress},
+		{X: x, Y: endY, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion},
+		{X: x, Y: endY, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease},
 	} {
 		updated, _ := m.Update(event)
 		m = updated.(Model)
