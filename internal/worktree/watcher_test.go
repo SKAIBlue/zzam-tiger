@@ -70,6 +70,42 @@ func TestWatcherDetectsChangesOutsideGitRepository(t *testing.T) {
 	waitForWatchPath(t, w, path)
 }
 
+func TestWatcherDetectsChangesToWatchedDirectory(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "visible")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.WatchDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "created.txt")
+	if err := os.WriteFile(path, []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitForWatchPath(t, w, path)
+	if err := w.UnwatchDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWatcherAcceptsEmptyDirectoryAsRoot(t *testing.T) {
+	root := t.TempDir()
+	w, err := NewWatcher(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.WatchDirectory(""); err != nil {
+		t.Fatalf("watch root: %v", err)
+	}
+}
+
 func TestWatcherKeepsOnlySelectedFileDirectory(t *testing.T) {
 	root := t.TempDir()
 	firstDir := filepath.Join(root, "first")

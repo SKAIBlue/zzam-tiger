@@ -26,6 +26,7 @@ type Watcher struct {
 	mu          sync.RWMutex
 	watchedFile string
 	watchedDir  string
+	watchedDirs map[string]struct{}
 	updates     chan WatchUpdate
 	done        chan struct{}
 	once        sync.Once
@@ -47,7 +48,7 @@ func NewWatcher(root string) (*Watcher, error) {
 	if err != nil {
 		return newPollingWatcher(root), nil
 	}
-	w := &Watcher{fs: fs, root: filepath.Clean(root), updates: make(chan WatchUpdate, 32), done: make(chan struct{})}
+	w := &Watcher{fs: fs, root: filepath.Clean(root), watchedDirs: make(map[string]struct{}), updates: make(chan WatchUpdate, 32), done: make(chan struct{})}
 	gitDirs, err := resolveGitDirs(root)
 	if err != nil {
 		fs.Close()
@@ -65,6 +66,66 @@ func NewWatcher(root string) (*Watcher, error) {
 	}
 	go w.run()
 	return w, nil
+}
+
+// WatchDirectory watches direct changes to a visible directory. It does not
+// recurse: callers add watches only for directories currently shown in a tree.
+func (w *Watcher) WatchDirectory(path string) error {
+	if path == "" {
+		path = w.root
+	} else {
+		path = cleanWatchPath(w.root, path)
+	}
+	if !within(w.root, path) {
+		return fmt.Errorf("watch directory %q is outside root", path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("watch directory %q is not a directory", path)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.polling {
+		return nil
+	}
+	if _, ok := w.watchedDirs[path]; ok {
+		return nil
+	}
+	if err := w.fs.Add(path); err != nil {
+		return err
+	}
+	w.watchedDirs[path] = struct{}{}
+	return nil
+}
+
+// UnwatchDirectory stops watching a directory previously added by
+// WatchDirectory. A preview watch for the same directory remains active.
+func (w *Watcher) UnwatchDirectory(path string) error {
+	if path == "" {
+		path = w.root
+	} else {
+		path = cleanWatchPath(w.root, path)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.watchedDirs[path]; !ok {
+		return nil
+	}
+	delete(w.watchedDirs, path)
+	if w.polling || path == w.watchedDir {
+		return nil
+	}
+	return w.fs.Remove(path)
+}
+
+// Polling reports whether this watcher had to fall back to full polling.
+func (w *Watcher) Polling() bool {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	return w.polling
 }
 
 // WatchFile moves the single live content watch to path. An empty path clears
@@ -97,6 +158,9 @@ func (w *Watcher) WatchFile(path string) error {
 	oldDir := w.watchedDir
 	w.watchedFile, w.watchedDir = path, dir
 	if oldDir != "" && oldDir != dir {
+		if _, kept := w.watchedDirs[oldDir]; kept {
+			return nil
+		}
 		_ = w.fs.Remove(oldDir)
 	}
 	return nil
@@ -349,12 +413,7 @@ func (w *Watcher) run() {
 			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Lstat(event.Name); err == nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-					if w.insideRoot(event.Name) {
-						if err := w.addTree(event.Name, true); err != nil {
-							w.fallbackToPolling(err)
-							return
-						}
-					} else if w.insideGitRefs(event.Name) {
+					if w.insideGitRefs(event.Name) {
 						if err := w.addTree(event.Name, false); err != nil {
 							w.fallbackToPolling(err)
 							return
@@ -374,7 +433,9 @@ func (w *Watcher) fallbackToPolling(_ error) {
 	// with a partially watched tree is worse than switching to a complete,
 	// portable snapshot. Do not surface the native error as fatal: polling has
 	// taken over and will report any errors that actually prevent refreshing.
+	w.mu.Lock()
 	w.polling = true
+	w.mu.Unlock()
 	_ = w.fs.Close()
 	w.pollLoop(nil, nil)
 }
@@ -402,8 +463,15 @@ func (w *Watcher) insideGitRefs(path string) bool {
 func (w *Watcher) relevant(path string) bool {
 	w.mu.RLock()
 	watchedFile := w.watchedFile
+	watchedDirs := make(map[string]struct{}, len(w.watchedDirs))
+	for dir := range w.watchedDirs {
+		watchedDirs[dir] = struct{}{}
+	}
 	w.mu.RUnlock()
 	if filepath.Clean(path) == watchedFile {
+		return true
+	}
+	if _, ok := watchedDirs[filepath.Dir(filepath.Clean(path))]; ok {
 		return true
 	}
 	for _, dir := range w.gitDirs {

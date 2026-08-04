@@ -138,6 +138,12 @@ type workspaceWatcher interface {
 	Close() error
 }
 
+type workspaceDirectoryWatcher interface {
+	WatchDirectory(string) error
+	UnwatchDirectory(string) error
+	Polling() bool
+}
+
 type updateResultMsg struct {
 	available bool
 }
@@ -227,6 +233,7 @@ type Model struct {
 	workspaceWatchGeneration       uint64
 	workspacePollGeneration        uint64
 	workspaceWatchPending          bool
+	workspaceDirtyDirectories      map[string]bool
 	workspaceWatcherErr            error
 	workspaceDebounce              time.Duration
 
@@ -372,6 +379,7 @@ func NewWithWorktree(backend provider.Provider, refresh time.Duration, workspace
 		return model
 	}
 	model.watcher = watcher
+	model.watchWorkspaceDirectory("")
 	return model
 }
 
@@ -386,6 +394,7 @@ func NewFilesOnly(workspace *worktree.Client) Model {
 		return model
 	}
 	model.watcher = watcher
+	model.watchWorkspaceDirectory("")
 	return model
 }
 
@@ -412,6 +421,7 @@ func newWithWorkspace(backend provider.Provider, refresh time.Duration, workspac
 	model.workspaceExpanded = make(map[string]bool)
 	model.workspaceLoaded = make(map[string]bool)
 	model.workspaceChangeCollapsed = make(map[string]bool)
+	model.workspaceDirtyDirectories = make(map[string]bool)
 	model.workspaceDebounce = 150 * time.Millisecond
 	// Start Files with a stable, readable File List width. A non-zero value is
 	// stored only after the user resizes the split, at which point the chosen
@@ -457,7 +467,7 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.workspace != nil {
 		commands = append(commands, commitRemoteTickCmd())
-		if m.workspaceFilesActive() {
+		if m.workspaceFilesActive() && m.workspaceUsesDirectoryPolling() {
 			commands = append(commands, workspacePollTickCmd(m.workspacePollGeneration))
 		}
 	}
@@ -893,20 +903,27 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.workspaceWatcherErr = fmt.Errorf("filesystem watcher error (manual refresh remains available): %w", msg.err)
 			return m, tea.Batch(commands...)
 		}
-		// A native event for the previewed file can refresh just that file. Other
-		// events (root entries and Git metadata) retain the debounced full reload.
+		// A native event for the previewed file can refresh just that file.
 		if m.workspaceFilesActive() && m.workspaceFile.Path != "" && filepath.Clean(msg.path) == filepath.Join(m.workspace.Root(), filepath.FromSlash(m.workspaceFile.Path)) {
 			m.workspacePreviewRequest++
 			m.workspacePreviewLoading = true
 			commands = append(commands, m.fetchWorkspaceFileCmd(m.workspacePreviewRequest, m.workspaceFile.Path))
 			return m, tea.Batch(commands...)
 		}
+		if m.workspaceFilesActive() && !m.workspaceUsesDirectoryPolling() {
+			if dir, ok := m.workspaceDirectoryForWatchPath(msg.path); ok {
+				m.workspaceDirtyDirectories[dir] = true
+			} else {
+				// Git metadata does not change the Files listing.
+				return m, tea.Batch(commands...)
+			}
+		}
 		m.workspaceWatchGeneration++
 		commands = append(commands, workspaceDebounceCmd(m.workspaceWatchGeneration, m.workspaceDebounce))
 		return m, tea.Batch(commands...)
 
 	case workspacePollTickMsg:
-		if uint64(msg) != m.workspacePollGeneration || !m.workspaceFilesActive() {
+		if uint64(msg) != m.workspacePollGeneration || !m.workspaceFilesActive() || !m.workspaceUsesDirectoryPolling() {
 			return m, nil
 		}
 		commands := []tea.Cmd{workspacePollTickCmd(m.workspacePollGeneration)}
@@ -928,6 +945,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.workspaceLoading {
 			m.workspaceWatchPending = true
 			return m, nil
+		}
+		if m.workspaceFilesActive() && !m.workspaceUsesDirectoryPolling() {
+			dirs := make([]string, 0, len(m.workspaceDirtyDirectories))
+			for dir := range m.workspaceDirtyDirectories {
+				dirs = append(dirs, dir)
+			}
+			m.workspaceDirtyDirectories = make(map[string]bool)
+			sort.Strings(dirs)
+			return m.startWorkspaceDirectoryLoad(dirs)
 		}
 		return m.startWorkspaceLoad()
 

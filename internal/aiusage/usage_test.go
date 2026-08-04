@@ -1,6 +1,7 @@
 package aiusage
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +31,8 @@ func TestLoadClaudeStatsWithCredential(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte("{}"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	data := `{"lastComputedDate":"2026-07-28","modelUsage":{"opus":{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":20,"cacheCreationInputTokens":2}},"dailyModelTokens":[{"date":"2026-07-28","tokensByModel":{"opus":37}}]}`
+	today := time.Now().Local().Format("2006-01-02")
+	data := fmt.Sprintf(`{"lastComputedDate":%q,"modelUsage":{"opus":{"inputTokens":10,"outputTokens":5,"cacheReadInputTokens":20,"cacheCreationInputTokens":2}},"dailyModelTokens":[{"date":%q,"tokensByModel":{"opus":37}}]}`, today, today)
 	if err := os.WriteFile(filepath.Join(dir, "stats-cache.json"), []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -202,11 +204,12 @@ func TestCodexActivityAggregatesInputOutputAndModelChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), []byte(`{}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	data := "" +
-		`{"timestamp":"2026-07-28T12:00:00Z","type":"turn_context","payload":{"model":"gpt-5"}}` + "\n" +
-		`{"timestamp":"2026-07-28T12:01:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"total_tokens":120}}}}` + "\n" +
-		`{"timestamp":"2026-07-28T12:02:00Z","type":"turn_context","payload":{"model":"gpt-5-mini"}}` + "\n" +
-		`{"timestamp":"2026-07-28T12:03:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":80,"output_tokens":30,"total_tokens":180}}}}` + "\n"
+	timestamp := time.Now().Local().Format(time.RFC3339)
+	data := fmt.Sprintf(""+
+		`{"timestamp":%q,"type":"turn_context","payload":{"model":"gpt-5"}}`+"\n"+
+		`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":60,"output_tokens":20,"total_tokens":120}}}}`+"\n"+
+		`{"timestamp":%q,"type":"turn_context","payload":{"model":"gpt-5-mini"}}`+"\n"+
+		`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":80,"output_tokens":30,"total_tokens":180}}}}`+"\n", timestamp, timestamp, timestamp, timestamp)
 	if err := os.WriteFile(filepath.Join(sessionsDir, "session.jsonl"), []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -234,9 +237,10 @@ func TestGeminiActivityReadsCurrentChatRecords(t *testing.T) {
 	if err := os.MkdirAll(chatDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	data := "" +
-		`{"id":"response-1","timestamp":"2026-07-28T12:00:00Z","type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100,"output":10,"cached":40,"thoughts":5,"total":115}}` + "\n" +
-		`{"id":"response-1","timestamp":"2026-07-28T12:00:00Z","type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100,"output":20,"cached":40,"thoughts":5,"total":125}}` + "\n"
+	timestamp := time.Now().Local().Format(time.RFC3339)
+	data := fmt.Sprintf(""+
+		`{"id":"response-1","timestamp":%q,"type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100,"output":10,"cached":40,"thoughts":5,"total":115}}`+"\n"+
+		`{"id":"response-1","timestamp":%q,"type":"gemini","model":"gemini-2.5-flash","tokens":{"input":100,"output":20,"cached":40,"thoughts":5,"total":125}}`+"\n", timestamp, timestamp)
 	if err := os.WriteFile(filepath.Join(chatDir, "session.jsonl"), []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}

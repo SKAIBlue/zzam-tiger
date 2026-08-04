@@ -6,9 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -50,6 +48,23 @@ type fakeWorkspaceWatcher struct {
 	updates chan worktree.WatchUpdate
 	closed  bool
 }
+
+type fakeDirectoryWatcher struct {
+	fakeWorkspaceWatcher
+	polling   bool
+	watched   []string
+	unwatched []string
+}
+
+func (w *fakeDirectoryWatcher) WatchDirectory(path string) error {
+	w.watched = append(w.watched, path)
+	return nil
+}
+func (w *fakeDirectoryWatcher) UnwatchDirectory(path string) error {
+	w.unwatched = append(w.unwatched, path)
+	return nil
+}
+func (w *fakeDirectoryWatcher) Polling() bool { return w.polling }
 
 func (w *fakeWorkspaceWatcher) Updates() <-chan worktree.WatchUpdate { return w.updates }
 func (w *fakeWorkspaceWatcher) Close() error {
@@ -141,6 +156,53 @@ func TestWorkspaceDirectoryPollingDoesNotReloadCommitDiff(t *testing.T) {
 	m = updated.(Model)
 	if !m.workspaceLoading {
 		t.Fatal("Files poll did not refresh directory listings")
+	}
+}
+
+func TestWorkspaceNativeDirectoryWatchReloadsOnlyChangedDirectory(t *testing.T) {
+	workspace := &fakeWorkspace{entriesByDir: map[string][]worktree.Entry{
+		"":     {{Path: "docs", Name: "docs", IsDir: true}, {Path: "src", Name: "src", IsDir: true}},
+		"docs": {{Path: "docs/guide.md", Name: "guide.md"}},
+		"src":  {{Path: "src/main.go", Name: "main.go"}},
+	}}
+	watcher := &fakeDirectoryWatcher{fakeWorkspaceWatcher: fakeWorkspaceWatcher{updates: make(chan worktree.WatchUpdate)}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+	m.workspaceLoading = false
+	m.workspaceEntries = append(m.workspaceEntries, workspace.entriesByDir[""]...)
+	m.workspaceEntries = append(m.workspaceEntries, workspace.entriesByDir["docs"]...)
+	m.workspaceEntries = append(m.workspaceEntries, workspace.entriesByDir["src"]...)
+	m.workspaceExpanded["docs"] = true
+	m.workspaceExpanded["src"] = true
+	m.workspaceLoaded["docs"] = true
+	m.workspaceLoaded["src"] = true
+	m.watcher = watcher
+
+	updated, _ := m.Update(workspaceWatchMsg{path: "/repo/docs/guide.md"})
+	m = updated.(Model)
+	updated, load := m.Update(workspaceDebounceMsg(m.workspaceWatchGeneration))
+	m = updated.(Model)
+	if load == nil || !m.workspaceLoading || m.workspaceEntryPending != 1 {
+		t.Fatalf("directory reload state: load=%v loading=%t pending=%d", load != nil, m.workspaceLoading, m.workspaceEntryPending)
+	}
+	result := load()
+	if batch, ok := result.(tea.BatchMsg); ok {
+		if len(batch) != 1 {
+			t.Fatalf("directory reload batch length = %d, want 1", len(batch))
+		}
+		result = batch[0]()
+	}
+	updated, _ = m.Update(result)
+	m = updated.(Model)
+	if got := strings.Join(workspace.entryDirs, "|"); got != "docs" {
+		t.Fatalf("reloaded directories = %q, want docs only", got)
+	}
+	if cmd := func() tea.Cmd {
+		updated, cmd := m.Update(workspacePollTickMsg(m.workspacePollGeneration))
+		m = updated.(Model)
+		return cmd
+	}(); cmd != nil {
+		t.Fatal("native directory watcher rescheduled polling")
 	}
 }
 
@@ -650,38 +712,15 @@ func TestFilesOnlyModeHasNoGitOrRemoteTabs(t *testing.T) {
 	}
 }
 
-func TestFilesOnlyModeRefreshesAfterDirectoryPoll(t *testing.T) {
-	root := t.TempDir()
-	m := NewFilesOnly(worktree.NewFilesystem(root))
+func TestFilesOnlyModeDoesNotPollWithNativeDirectoryWatch(t *testing.T) {
+	m := NewFilesOnly(worktree.NewFilesystem(t.TempDir()))
 	defer m.Close()
 	m.workspaceLoading = false
 
-	path := filepath.Join(root, "created.txt")
-	if err := os.WriteFile(path, []byte("created"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	update, cmd := m.Update(workspacePollTickMsg(m.workspacePollGeneration))
-	m = update.(Model)
-	if cmd == nil || !m.workspaceLoading {
-		t.Fatalf("directory poll did not schedule reload: cmd=%v loading=%t", cmd != nil, m.workspaceLoading)
-	}
-	// The returned batch contains the next poll and the directory reload.
-	batch, ok := cmd().(tea.BatchMsg)
-	if !ok || len(batch) != 2 {
-		t.Fatalf("poll command = %#v, want poll and reload batch", cmd())
-	}
-	result := batch[1]()
-	if batch, ok := result.(tea.BatchMsg); ok {
-		for _, candidate := range batch {
-			update, _ = m.Update(candidate())
-			m = update.(Model)
-		}
-	} else {
-		update, _ = m.Update(result)
-		m = update.(Model)
-	}
-	if len(m.workspaceEntries) != 1 || m.workspaceEntries[0].Path != "created.txt" {
-		t.Fatalf("Files-only poll reload entries = %#v", m.workspaceEntries)
+	updated, cmd := m.Update(workspacePollTickMsg(m.workspacePollGeneration))
+	m = updated.(Model)
+	if cmd != nil || m.workspaceLoading {
+		t.Fatalf("native directory watcher retained polling: cmd=%v loading=%t", cmd != nil, m.workspaceLoading)
 	}
 }
 

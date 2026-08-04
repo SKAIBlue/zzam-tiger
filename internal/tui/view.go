@@ -1158,7 +1158,10 @@ func (m Model) workspaceList(width, height int) string {
 			row := strings.Repeat("  ", display.depth) + prefix + icon + " " + name
 			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
 			if index == m.workspaceCursor {
-				row = selectedRow.Render(row)
+				// Icon and match styles reset terminal attributes. Strip nested ANSI
+				// styles before applying selection so its background reaches the
+				// filename and trailing padding, not just the icon.
+				row = selectedRow.Copy().Width(width).Render(ansi.Strip(row))
 			}
 			rows = append(rows, row)
 		}

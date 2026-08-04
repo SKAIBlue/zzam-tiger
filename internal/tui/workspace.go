@@ -226,7 +226,6 @@ func (m Model) startWorkspaceLoad() (Model, tea.Cmd) {
 	m.workspacePreviewLoading = false
 	m.err = nil
 	if m.workspaceFilesActive() {
-		m.workspaceEntryRequest++
 		dirs := []string{""}
 		for dir, expanded := range m.workspaceExpanded {
 			if expanded {
@@ -234,15 +233,25 @@ func (m Model) startWorkspaceLoad() (Model, tea.Cmd) {
 			}
 		}
 		sort.Strings(dirs[1:])
-		m.workspaceEntryPending = len(dirs)
-		commands := make([]tea.Cmd, 0, len(dirs))
-		for _, dir := range dirs {
-			commands = append(commands, m.fetchWorkspaceEntriesCmd(m.workspaceEntryRequest, dir, false))
-		}
-		return m, tea.Batch(commands...)
+		return m.startWorkspaceDirectoryLoad(dirs)
 	}
 	m.workspaceRequest++
 	return m, m.fetchWorkspaceCmd(m.workspaceRequest)
+}
+
+func (m Model) startWorkspaceDirectoryLoad(dirs []string) (Model, tea.Cmd) {
+	if len(dirs) == 0 {
+		m.workspaceLoading = false
+		return m, nil
+	}
+	m.workspaceEntryRequest++
+	m.workspaceLoading = true
+	m.workspaceEntryPending = len(dirs)
+	commands := make([]tea.Cmd, 0, len(dirs))
+	for _, dir := range dirs {
+		commands = append(commands, m.fetchWorkspaceEntriesCmd(m.workspaceEntryRequest, dir, false))
+	}
+	return m, tea.Batch(commands...)
 }
 
 func (m Model) finishWorkspaceLoad(cmd tea.Cmd) (tea.Model, tea.Cmd) {
@@ -473,6 +482,11 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 				m.workspaceExpanded[groups[index].dir] = true
 			}
 		}
+		for dir, expanded := range m.workspaceExpanded {
+			if expanded {
+				m.watchWorkspaceDirectory(dir)
+			}
+		}
 		m.workspaceEntryPending = max(0, m.workspaceEntryPending-1)
 		m.workspaceLoading = m.workspaceEntryPending > 0
 		entries := m.filteredWorkspaceEntries()
@@ -639,6 +653,53 @@ func (m *Model) watchWorkspaceFile(path string) {
 	}
 }
 
+func (m *Model) watchWorkspaceDirectory(dir string) {
+	watcher, ok := m.watcher.(workspaceDirectoryWatcher)
+	if !ok || watcher.Polling() {
+		return
+	}
+	if err := watcher.WatchDirectory(dir); err != nil {
+		m.workspaceWatcherErr = fmt.Errorf("watch directory: %w", err)
+	}
+}
+
+func (m *Model) unwatchWorkspaceDirectoryTree(dir string) {
+	watcher, ok := m.watcher.(workspaceDirectoryWatcher)
+	if !ok || watcher.Polling() {
+		return
+	}
+	prefix := dir + "/"
+	for path, expanded := range m.workspaceExpanded {
+		if expanded && (path == dir || strings.HasPrefix(path, prefix)) {
+			if err := watcher.UnwatchDirectory(path); err != nil {
+				m.workspaceWatcherErr = fmt.Errorf("unwatch directory: %w", err)
+			}
+		}
+	}
+}
+
+func (m Model) workspaceUsesDirectoryPolling() bool {
+	watcher, ok := m.watcher.(workspaceDirectoryWatcher)
+	return !ok || watcher.Polling()
+}
+
+func (m Model) workspaceDirectoryForWatchPath(path string) (string, bool) {
+	rel, err := filepath.Rel(m.workspace.Root(), path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	dir := filepath.ToSlash(filepath.Dir(rel))
+	if dir == "." {
+		dir = ""
+	}
+	for {
+		if dir == "" || m.workspaceExpanded[dir] {
+			return dir, true
+		}
+		dir = workspaceParent(dir)
+	}
+}
+
 func (m Model) filteredWorkspaceEntries() []worktree.Entry {
 	displays := m.filteredWorkspaceEntryDisplays()
 	result := make([]worktree.Entry, 0, len(displays))
@@ -793,6 +854,7 @@ func (m Model) toggleWorkspaceDirectory() (Model, tea.Cmd) {
 	}
 	dir := entries[m.workspaceCursor].Path
 	if m.workspaceExpanded[dir] {
+		m.unwatchWorkspaceDirectoryTree(dir)
 		m.workspaceExpanded[dir] = false
 		m.workspaceLoaded[dir] = false
 		m.clampWorkspaceCursor(len(m.filteredWorkspaceEntries()))
@@ -800,6 +862,7 @@ func (m Model) toggleWorkspaceDirectory() (Model, tea.Cmd) {
 	}
 	if m.workspaceLoaded[dir] {
 		m.workspaceExpanded[dir] = true
+		m.watchWorkspaceDirectory(dir)
 		commands := make([]tea.Cmd, 0)
 		for _, entry := range m.workspaceEntries {
 			if workspaceParent(entry.Path) == dir && entry.IsDir && !m.workspaceLoaded[entry.Path] {
