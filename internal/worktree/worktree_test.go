@@ -115,6 +115,48 @@ func TestEntriesAndRead(t *testing.T) {
 	}
 }
 
+func TestWriteReplacesRegularFileAndPreservesPermissions(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "notes.txt")
+	if err := os.WriteFile(path, []byte("before\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	client := NewFilesystem(root)
+	if err := client.Write(context.Background(), "notes.txt", []byte("after\n")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "after\n" {
+		t.Fatalf("written file = %q, err=%v", data, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("file permissions = %v, err=%v", info.Mode().Perm(), err)
+	}
+	if err := client.Write(context.Background(), "../outside.txt", []byte("no")); err == nil {
+		t.Fatal("Write accepted a path outside the workspace")
+	}
+}
+
+func TestRenameMovesFileWithoutReplacingDestination(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "old.txt", []byte("content"))
+	writeFile(t, root, "taken.txt", []byte("keep"))
+	client := NewFilesystem(root)
+	if err := client.Rename(context.Background(), "old.txt", "new.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "new.txt")); err != nil || string(data) != "content" {
+		t.Fatalf("renamed file = %q, err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "old.txt")); !os.IsNotExist(err) {
+		t.Fatalf("old file still exists: %v", err)
+	}
+	if err := client.Rename(context.Background(), "new.txt", "taken.txt"); err == nil {
+		t.Fatal("Rename replaced an existing destination")
+	}
+}
+
 func TestEntriesPropagatesIgnoreCheckFailure(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "visible.txt", []byte("visible"))

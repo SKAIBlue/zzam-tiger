@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -35,6 +36,8 @@ var (
 	activeFilter               = lipgloss.NewStyle().Bold(true).Foreground(green).Underline(true)
 	focusedFilter              = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(accent)
 	selectedRow                = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF")).Background(lipgloss.Color("#343B58"))
+	draggedFileRow             = lipgloss.NewStyle().Foreground(muted).Background(lipgloss.Color("#252A3A")).Faint(true)
+	dropTargetRow              = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#111318")).Background(green)
 	myAssignmentTitle          = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5C07B"))
 	metaStyle                  = lipgloss.NewStyle().Foreground(muted)
 	errorStyle                 = lipgloss.NewStyle().Foreground(red)
@@ -952,7 +955,11 @@ func (m Model) workspaceView() string {
 	rightContentWidth := max(1, rightWidth-2)
 	left := m.workspaceList(leftContentWidth, contentHeight)
 	right := ""
-	if m.workspacePreviewErr != nil {
+	rightTitle := "Preview"
+	if m.workspacePreviewEditing {
+		right = m.highlightedFileEditorView(rightContentWidth, contentHeight)
+		rightTitle = "Preview · Editing"
+	} else if m.workspacePreviewErr != nil {
 		right = errorStyle.Render("Unable to load preview: " + truncate(sanitizeWorkspaceLabel(m.workspacePreviewErr.Error()), max(1, rightContentWidth-24)))
 	} else if m.workspaceFilesActive() {
 		right = renderWorkspaceFileWithImageAt(m.workspaceFile, m.workspaceImage, rightContentWidth, contentHeight, m.workspacePreviewOffset)
@@ -964,7 +971,7 @@ func (m Model) workspaceView() string {
 		}
 	}
 	left = contentPanel("File List", strings.Split(left, "\n"), leftWidth, bodyHeight, m.focus == focusWorkspaceList)
-	right = contentPanel("Preview", strings.Split(right, "\n"), rightWidth, bodyHeight, m.focus == focusWorkspacePreview)
+	right = contentPanel(rightTitle, strings.Split(right, "\n"), rightWidth, bodyHeight, m.focus == focusWorkspacePreview)
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
 		lipgloss.NewStyle().Width(leftWidth).Height(bodyHeight).Render(left),
 		lipgloss.NewStyle().Width(rightWidth).Height(bodyHeight).Render(right),
@@ -1063,7 +1070,7 @@ func (m Model) workspaceFocusHelp() string {
 		if m.workspaceCommitActive() {
 			return "Changed files focused · ↑/↓ select · → preview · Space stage · Enter expand"
 		}
-		return "File list focused · ↑/↓ select · → preview · Enter expand"
+		return "File list focused · ↑/↓ select · → preview · drag onto folder to move · E edit · N rename · Enter expand"
 	default:
 		return "↓ move focus"
 	}
@@ -1156,8 +1163,18 @@ func (m Model) workspaceList(width, height int) string {
 			}
 			name := m.highlightWorkspaceMatch(sanitizeWorkspaceLabel(entry.Name))
 			row := strings.Repeat("  ", display.depth) + prefix + icon + " " + name
+			if m.workspaceFileDragging && entry.Path == m.workspaceFileDragTarget {
+				row += "  ← drop here"
+			}
 			row = lipgloss.NewStyle().Width(width).Render(truncate(row, width))
-			if index == m.workspaceCursor {
+			if m.workspaceFileDragging && entry.Path == m.workspaceFileDragTarget {
+				// A bright target makes it clear where releasing the mouse will move
+				// the file, independently of the keyboard selection.
+				row = dropTargetRow.Copy().Width(width).Render(ansi.Strip(row))
+			} else if m.workspaceFileDragging && entry.Path == m.workspaceFileDragPath {
+				// Keep the source visible but visually distinct while it is in flight.
+				row = draggedFileRow.Copy().Width(width).Render(ansi.Strip(row))
+			} else if index == m.workspaceCursor {
 				// Icon and match styles reset terminal attributes. Strip nested ANSI
 				// styles before applying selection so its background reaches the
 				// filename and trailing padding, not just the icon.
@@ -1786,6 +1803,93 @@ func (m Model) commentOverlay(background string) string {
 	body += "\n" + metaStyle.Render("Ctrl+S submit · Esc cancel")
 	composer := composerStyle.Width(composerWidth).Render(body)
 	return placeBottomOverlay(m.width, m.height, composer, background)
+}
+
+type fileEditorRow struct {
+	line, segment int
+	text          string
+}
+
+// highlightedFileEditorView renders the textarea buffer itself so the editor
+// can retain syntax colours while the textarea continues to own editing keys.
+func (m Model) highlightedFileEditorView(width, height int) string {
+	height = max(1, height)
+	m.fileEditor.SetWidth(max(12, width))
+	m.fileEditor.SetHeight(height)
+	contentWidth := max(1, m.fileEditor.Width())
+	value := sanitizeWorkspaceText(strings.ReplaceAll(m.fileEditor.Value(), "\r\n", "\n"))
+	source := strings.Split(value, "\n")
+	rows := make([]fileEditorRow, 0, len(source))
+	for line, text := range source {
+		for segment, fragment := range wrapFileEditorLine(text, contentWidth) {
+			rows = append(rows, fileEditorRow{line: line, segment: segment, text: fragment})
+		}
+	}
+
+	cursorLine := m.fileEditor.Line()
+	cursor := m.fileEditor.LineInfo()
+	cursorRow := 0
+	for index, row := range rows {
+		if row.line == cursorLine && row.segment == cursor.RowOffset {
+			cursorRow = index
+			break
+		}
+	}
+	start := min(max(0, cursorRow-height/2), max(0, len(rows)-height))
+	end := min(len(rows), start+height)
+	digits := len(strconv.Itoa(max(1, len(source))))
+	highlighter := newCodeHighlighter(m.fileEditorPath)
+	result := make([]string, 0, height)
+	for index := start; index < end; index++ {
+		row := rows[index]
+		gutter := strings.Repeat(" ", digits)
+		if row.segment == 0 {
+			gutter = fmt.Sprintf("%*d", digits, row.line+1)
+		}
+		content := highlighter.line(row.text)
+		if row.line == cursorLine && row.segment == cursor.RowOffset {
+			content = renderHighlightedEditorCursor(row.text, cursor.ColumnOffset, highlighter)
+		}
+		result = append(result, metaStyle.Render(" "+gutter+" │ ")+content+strings.Repeat(" ", max(0, contentWidth-lipgloss.Width(content))))
+	}
+	for len(result) < height {
+		result = append(result, metaStyle.Render(" "+strings.Repeat(" ", digits)+" │ ~"))
+	}
+	return strings.Join(result, "\n")
+}
+
+func wrapFileEditorLine(value string, width int) []string {
+	if value == "" {
+		return []string{""}
+	}
+	var rows []string
+	var current strings.Builder
+	column := 0
+	for _, r := range value {
+		rendered := string(r)
+		if r == '\t' {
+			rendered = strings.Repeat(" ", 4-column%4)
+		}
+		runeWidth := max(1, lipgloss.Width(rendered))
+		if column > 0 && column+runeWidth > width {
+			rows = append(rows, current.String())
+			current.Reset()
+			column = 0
+		}
+		current.WriteString(rendered)
+		column += runeWidth
+	}
+	rows = append(rows, current.String())
+	return rows
+}
+
+func renderHighlightedEditorCursor(value string, column int, highlighter codeHighlighter) string {
+	runes := []rune(value)
+	column = min(max(0, column), len(runes))
+	if column == len(runes) {
+		return highlighter.line(value) + selectedRow.Render(" ")
+	}
+	return highlighter.line(string(runes[:column])) + selectedRow.Render(string(runes[column])) + highlighter.line(string(runes[column+1:]))
 }
 
 func reviewTargetLines(target provider.ReviewTarget) (int, int) {

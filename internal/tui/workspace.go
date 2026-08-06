@@ -34,6 +34,8 @@ type workspaceClient interface {
 	Root() string
 	Entries(context.Context, string) ([]worktree.Entry, error)
 	Read(context.Context, string) (worktree.File, error)
+	Write(context.Context, string, []byte) error
+	Rename(context.Context, string, string) error
 	Status(context.Context) (worktree.Status, error)
 	Stage(context.Context, string) error
 	StageAll(context.Context) error
@@ -572,7 +574,7 @@ func (m Model) handleWorkspaceResult(msg workspaceResultMsg) (tea.Model, tea.Cmd
 }
 
 func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Model, tea.Cmd) {
-	if msg.request != m.workspaceRequest || !m.workspaceCommitActive() {
+	if msg.request != m.workspaceRequest || !m.workspaceCommitActive() && !m.workspacePreviewEditing && msg.action != "rename file" {
 		return m, nil
 	}
 	m.actionBusy = false
@@ -583,9 +585,23 @@ func (m Model) handleWorkspaceActionResult(msg workspaceActionResultMsg) (tea.Mo
 		if msg.action == "commit" {
 			return m, m.commitMessage.Focus()
 		}
+		if msg.action == "save file" {
+			return m, m.fileEditor.Focus()
+		}
 		return m, nil
 	}
 	m.status = msg.action + " completed"
+	if msg.action == "rename file" {
+		m.fileRenamePath = ""
+	}
+	if msg.action == "save file" {
+		m.fileEditor.Blur()
+		m.workspacePreviewEditing = false
+		m.err = nil
+		m.workspacePreviewRequest++
+		m.workspacePreviewLoading = true
+		return m, m.fetchWorkspaceFileCmd(m.workspacePreviewRequest, m.fileEditorPath)
+	}
 	if msg.action == "commit" {
 		m.commitMessage.SetValue("")
 		m.commitMessage.Blur()
@@ -1276,6 +1292,14 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.workspaceLoading = false
 		return m.startWorkspaceLoad()
+	case "e":
+		if m.workspaceFilesActive() {
+			return m.openFileEditor()
+		}
+	case "n":
+		if m.workspaceFilesActive() {
+			return m.openFileRenameModal()
+		}
 	case " ", "s", "u":
 		if m.workspaceCommitActive() {
 			return m.toggleWorkspaceStage(msg.String())
@@ -1286,6 +1310,115 @@ func (m Model) updateWorkspace(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m Model) openFileRenameModal() (tea.Model, tea.Cmd) {
+	entries := m.filteredWorkspaceEntries()
+	if m.workspaceCursor < 0 || m.workspaceCursor >= len(entries) || entries[m.workspaceCursor].IsDir {
+		m.status = "select a file to rename"
+		return m, nil
+	}
+	m.fileRenamePath = entries[m.workspaceCursor].Path
+	return m.OpenModal(ModalRequest{
+		Title:      "Rename file",
+		HasConfirm: true,
+		Items: []ModalItem{
+			{Type: "text", Text: m.fileRenamePath},
+			{Type: "input", ID: "path", Text: "New path", Default: m.fileRenamePath, Required: true},
+		},
+	})
+}
+
+func (m Model) startFileRename(newPath string) (tea.Model, tea.Cmd) {
+	oldPath := m.fileRenamePath
+	if strings.TrimSpace(newPath) == "" || oldPath == "" {
+		m.fileRenamePath = ""
+		m.status = "file rename cancelled"
+		return m, nil
+	}
+	m.actionBusy = true
+	m.err = nil
+	m.status = "renaming file…"
+	request := m.workspaceRequest
+	return m, func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return workspaceActionResultMsg{request: request, action: "rename file", err: m.workspace.Rename(ctx, oldPath, newPath)}
+	}
+}
+
+func (m Model) workspaceDropDirectory(x, y int) string {
+	if !m.workspaceFilesActive() {
+		return ""
+	}
+	leftWidth, _ := m.workspacePaneWidths()
+	bodyStart := 7
+	if x < 0 || x >= leftWidth || y < bodyStart || y >= bodyStart+m.workspaceListHeight() {
+		return ""
+	}
+	index := m.workspaceOffset + y - bodyStart
+	entries := m.filteredWorkspaceEntries()
+	if index < 0 || index >= len(entries) || !entries[index].IsDir {
+		return ""
+	}
+	return entries[index].Path
+}
+
+func (m Model) openFileEditor() (tea.Model, tea.Cmd) {
+	entries := m.filteredWorkspaceEntries()
+	if m.workspaceCursor < 0 || m.workspaceCursor >= len(entries) || entries[m.workspaceCursor].IsDir {
+		m.status = "select a file to edit"
+		return m, nil
+	}
+	file := m.workspaceFile
+	if file.Path != entries[m.workspaceCursor].Path || m.workspacePreviewLoading {
+		m.status = "wait for the file preview before editing"
+		return m, nil
+	}
+	if file.Image || file.Binary || !utf8.Valid(file.Data) {
+		m.status = "binary and image files cannot be edited"
+		return m, nil
+	}
+	if file.Truncated {
+		m.status = "files larger than 8 MiB cannot be edited"
+		return m, nil
+	}
+	m.fileEditorPath = file.Path
+	m.fileEditor.SetValue(string(file.Data))
+	m.fileEditor.CursorStart()
+	_, rightWidth := m.workspacePaneWidths()
+	m.fileEditor.SetWidth(max(12, rightWidth+1))
+	m.fileEditor.SetHeight(max(3, m.workspaceListHeight()))
+	m.workspacePreviewEditing = true
+	m.err = nil
+	return m, m.fileEditor.Focus()
+}
+
+func (m Model) updateFileEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.actionBusy {
+		return m, nil
+	}
+	switch msg.String() {
+	case "esc":
+		m.fileEditor.Blur()
+		m.workspacePreviewEditing = false
+		m.err = nil
+		m.status = "file edit cancelled"
+		return m, nil
+	case "ctrl+s":
+		m.actionBusy = true
+		m.err = nil
+		m.status = "saving file…"
+		request, path, data := m.workspaceRequest, m.fileEditorPath, []byte(m.fileEditor.Value())
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			return workspaceActionResultMsg{request: request, action: "save file", err: m.workspace.Write(ctx, path, data)}
+		}
+	}
+	var cmd tea.Cmd
+	m.fileEditor, cmd = m.fileEditor.Update(msg)
+	return m, cmd
 }
 
 func (m Model) insertCommitMessageNewline() Model {

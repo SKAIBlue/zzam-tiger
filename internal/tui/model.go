@@ -191,6 +191,9 @@ type Model struct {
 	lastModalResult      *ModalResult
 	modalError           string
 	comment              textarea.Model
+	fileEditor           textarea.Model
+	fileEditorPath       string
+	fileRenamePath       string
 	fileFilter           textinput.Model
 	graphQuery           textinput.Model // shared Search input for non-workspace tabs
 	commitMessage        textinput.Model
@@ -222,6 +225,10 @@ type Model struct {
 	workspaceLoading               bool
 	workspacePreviewLoading        bool
 	workspacePreviewErr            error
+	workspacePreviewEditing        bool
+	workspaceFileDragPath          string
+	workspaceFileDragTarget        string
+	workspaceFileDragging          bool
 	workspaceExpanded              map[string]bool
 	workspaceLoaded                map[string]bool
 	workspaceChangeCollapsed       map[string]bool
@@ -309,6 +316,10 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 	comment.ShowLineNumbers = false
 	comment.SetWidth(66)
 	comment.SetHeight(8)
+	fileEditor := textarea.New()
+	fileEditor.ShowLineNumbers = true
+	fileEditor.SetWidth(80)
+	fileEditor.SetHeight(20)
 	fileFilter := textinput.New()
 	// A blinking input cursor makes Bubble Tea repaint the entire Commit
 	// dashboard twice per blink cycle, which is visibly disruptive for a large
@@ -341,6 +352,7 @@ func New(backend provider.Provider, refresh time.Duration) Model {
 		labels:         labels,
 		branchInput:    branchInput,
 		comment:        comment,
+		fileEditor:     fileEditor,
 		fileFilter:     fileFilter,
 		graphQuery:     graphQuery,
 		commitMessage:  commitMessage,
@@ -1093,6 +1105,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				updated.status = "branch deletion cancelled"
 			}
+			if updated.fileRenamePath != "" && updated.modal == nil && updated.lastModalResult != nil {
+				result, ok := updated.LastModalResult()
+				if !ok || !result.Confirm {
+					updated.fileRenamePath = ""
+					updated.status = "file rename cancelled"
+					return updated, cmd
+				}
+				path, _ := result.Results["path"].(string)
+				return updated.startFileRename(path)
+			}
 			return updated, cmd
 		}
 		if m.screen == labelScreen {
@@ -1103,6 +1125,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == commentScreen {
 			return m.updateCommentInput(msg)
+		}
+		if m.workspacePreviewEditing && m.localTab() {
+			return m.updateFileEditor(msg)
 		}
 		if m.screen == diffScreen {
 			return m.updateDiff(msg)
@@ -1164,6 +1189,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.screen == commentScreen {
 		var cmd tea.Cmd
 		m.comment, cmd = m.comment.Update(message)
+		return m, cmd
+	}
+	if m.workspacePreviewEditing && m.localTab() {
+		var cmd tea.Cmd
+		m.fileEditor, cmd = m.fileEditor.Update(message)
 		return m, cmd
 	}
 	if m.screen == detailScreen || m.screen == diffScreen {
@@ -2903,6 +2933,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.updateAvailable = false
 		return m, tea.ExecProcess(m.installUpdate(), func(err error) tea.Msg { return installFinishedMsg{err: err} })
 	}
+	if m.workspacePreviewEditing && m.localTab() {
+		return m, nil
+	}
 	if m.workspaceDividerDragging {
 		switch msg.Action {
 		case tea.MouseActionRelease:
@@ -2913,6 +2946,36 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case tea.MouseActionPress:
 			// Recover if a terminal failed to deliver the prior release.
 			m.workspaceDividerDragging = false
+		}
+	}
+	if m.workspaceFileDragPath != "" {
+		switch msg.Action {
+		case tea.MouseActionMotion:
+			m.workspaceFileDragging = true
+			m.workspaceFileDragTarget = m.workspaceDropDirectory(msg.X, msg.Y)
+			if m.workspaceFileDragTarget != "" {
+				m.status = "drop to move " + m.workspaceFileDragPath + " into " + m.workspaceFileDragTarget
+			}
+			return m, nil
+		case tea.MouseActionRelease:
+			source := m.workspaceFileDragPath
+			target := m.workspaceDropDirectory(msg.X, msg.Y)
+			wasDragging := m.workspaceFileDragging
+			m.workspaceFileDragPath, m.workspaceFileDragTarget, m.workspaceFileDragging = "", "", false
+			if !wasDragging {
+				return m, nil
+			}
+			if target == "" {
+				m.status = "file move cancelled"
+				return m, nil
+			}
+			destination := filepath.ToSlash(filepath.Join(target, filepath.Base(source)))
+			if destination == source {
+				m.status = "file is already in that directory"
+				return m, nil
+			}
+			m.fileRenamePath = source
+			return m.startFileRename(destination)
 		}
 	}
 	if m.workspaceCommitDividerDragging {
@@ -3142,6 +3205,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		if index >= 0 && index < length {
 			m.workspaceCursor = index
 			m.ensureWorkspaceCursorVisible()
+			if m.workspaceFilesActive() && !m.filteredWorkspaceEntries()[index].IsDir {
+				m.workspaceFileDragPath = m.filteredWorkspaceEntries()[index].Path
+				m.workspaceFileDragTarget = ""
+				m.workspaceFileDragging = false
+			}
 			if m.workspaceFilesActive() && m.filteredWorkspaceEntries()[index].IsDir {
 				return m.toggleWorkspaceDirectory()
 			}

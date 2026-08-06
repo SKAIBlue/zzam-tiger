@@ -25,7 +25,7 @@ type Client struct {
 	filesystem bool
 }
 
-// NewFilesystem creates a read-only filesystem browser rooted at root.
+// NewFilesystem creates a filesystem browser rooted at root.
 // Unlike New, it does not require Git and does not apply .gitignore rules.
 func NewFilesystem(root string) *Client {
 	if abs, err := filepath.Abs(root); err == nil {
@@ -276,6 +276,68 @@ func (c *Client) Read(ctx context.Context, path string) (File, error) {
 		Path: clean, Data: data, Binary: isBinary(data),
 		Image: strings.HasPrefix(mimeType, "image/"), MIME: mimeType, Truncated: truncated,
 	}, nil
+}
+
+// Write replaces a regular working-tree file while preserving its permissions.
+// It uses the same containment checks as Read, so symlinks cannot escape the
+// workspace root.
+func (c *Client) Write(ctx context.Context, path string, data []byte) error {
+	abs, _, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("path %q is not a regular file", path)
+	}
+	if err := os.WriteFile(abs, data, info.Mode().Perm()); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// Rename moves a regular file to a new workspace-relative path without
+// replacing an existing destination.
+func (c *Client) Rename(ctx context.Context, path, newPath string) error {
+	source, cleanSource, err := c.resolve(path)
+	if err != nil {
+		return err
+	}
+	destination, cleanDestination, err := c.resolve(newPath)
+	if err != nil {
+		return err
+	}
+	if cleanSource == cleanDestination {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("path %q is not a regular file", path)
+	}
+	if _, err := os.Lstat(destination); err == nil {
+		return fmt.Errorf("destination %q already exists", newPath)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(source, destination); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 // Status returns porcelain status split into staging-oriented groups.

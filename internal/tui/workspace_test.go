@@ -42,6 +42,21 @@ type fakeWorkspace struct {
 	remote       worktree.RemoteState
 	pulls        int
 	pushes       int
+	writes       map[string][]byte
+	renames      [][2]string
+}
+
+func (w *fakeWorkspace) Write(_ context.Context, path string, data []byte) error {
+	if w.writes == nil {
+		w.writes = make(map[string][]byte)
+	}
+	w.writes[path] = append([]byte(nil), data...)
+	return nil
+}
+
+func (w *fakeWorkspace) Rename(_ context.Context, path, newPath string) error {
+	w.renames = append(w.renames, [2]string{path, newPath})
+	return nil
 }
 
 type fakeWorkspaceWatcher struct {
@@ -79,6 +94,7 @@ func TestWorkspaceWatchDebouncesAndSeparatesRemotePolling(t *testing.T) {
 	m := newWithWorkspace(fakeProvider{}, time.Second, &fakeWorkspace{})
 	m.workspaceLoading = false
 	m.active = workspaceFilesTab
+	m.workspacePreviewLoading = false
 
 	updated, cmd := m.Update(workspaceWatchMsg{path: "/repo/file.txt"})
 	m = updated.(Model)
@@ -2571,6 +2587,147 @@ func TestWorkspaceFileSelectionChangeResetsPreviewOffset(t *testing.T) {
 	updated, load = updated.loadSelectedWorkspaceItem()
 	if load != nil || updated.workspacePreviewOffset != 0 || updated.workspaceFile.Path != "" {
 		t.Fatalf("directory selection: load=%v offset=%d file=%q", load != nil, updated.workspacePreviewOffset, updated.workspaceFile.Path)
+	}
+}
+
+func TestWorkspaceFileEditorSavesTextAndRejectsBinaryFiles(t *testing.T) {
+	workspace := &fakeWorkspace{files: map[string]worktree.File{
+		"notes.txt":  {Path: "notes.txt", Data: []byte("before\n")},
+		"binary.bin": {Path: "binary.bin", Data: []byte{0, 1}, Binary: true},
+	}}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+	m.width, m.height = 100, 20
+	m.workspacePreviewLoading = false
+	m.workspaceEntries = []worktree.Entry{{Path: "notes.txt", Name: "notes.txt"}, {Path: "binary.bin", Name: "binary.bin"}}
+	m.workspaceCursor = 1 // Entries are displayed in lexical order: binary.bin, notes.txt.
+	m.workspaceFile = workspace.files["notes.txt"]
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(Model)
+	if !m.workspacePreviewEditing || m.fileEditorPath != "notes.txt" || m.fileEditor.Value() != "before\n" {
+		t.Fatalf("editor did not open: editing=%t path=%q value=%q", m.workspacePreviewEditing, m.fileEditorPath, m.fileEditor.Value())
+	}
+	if !strings.Contains(ansi.Strip(m.workspaceView()), "Preview · Editing") {
+		t.Fatalf("workspace did not render the inline editor: %q", ansi.Strip(m.workspaceView()))
+	}
+	m.fileEditor.SetValue("after\n")
+	updated, save := m.Update(tea.KeyMsg{Type: tea.KeyCtrlS})
+	m = updated.(Model)
+	if save == nil || !m.actionBusy {
+		t.Fatalf("save did not start: cmd=%v busy=%t", save != nil, m.actionBusy)
+	}
+	updated, reload := m.Update(save())
+	m = updated.(Model)
+	if reload == nil || m.workspacePreviewEditing || string(workspace.writes["notes.txt"]) != "after\n" {
+		t.Fatalf("save result: reload=%v editing=%t writes=%q", reload != nil, m.workspacePreviewEditing, workspace.writes["notes.txt"])
+	}
+
+	m.workspaceCursor = 0
+	m.workspaceFile = workspace.files["binary.bin"]
+	m.workspacePreviewLoading = false
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(Model)
+	if m.workspacePreviewEditing || !strings.Contains(m.status, "cannot be edited") {
+		t.Fatalf("binary file editor state: editing=%t status=%q", m.workspacePreviewEditing, m.status)
+	}
+}
+
+func TestWorkspaceFileEditorKeepsSyntaxHighlighting(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.width, m.height = 80, 20
+	m.fileEditorPath = "main.go"
+	m.fileEditor.SetValue("func main() {\n\tfmt.Println(\"hi\")\n}")
+	m.fileEditor.CursorStart()
+
+	view := m.highlightedFileEditorView(76, 15)
+	if !strings.Contains(view, "\x1b[38;2;") {
+		t.Fatalf("editor did not render syntax colours: %q", view)
+	}
+	if stripped := ansi.Strip(view); !strings.Contains(stripped, "func main()") || !strings.Contains(stripped, "fmt.Println") {
+		t.Fatalf("editor lost source text: %q", stripped)
+	}
+}
+
+func TestWorkspaceFileRenameUsesModalAndRefreshesFiles(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active = workspaceFilesTab
+	m.workspaceEntries = []worktree.Entry{{Path: "old.txt", Name: "old.txt"}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	m = updated.(Model)
+	if m.modal == nil || m.fileRenamePath != "old.txt" {
+		t.Fatalf("rename modal = %#v, path=%q", m.modal, m.fileRenamePath)
+	}
+	input := m.modal.inputs[1]
+	input.SetValue("new.txt")
+	m.modal.inputs[1] = input
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	updated, rename := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if rename == nil || !m.actionBusy {
+		t.Fatalf("rename did not start: cmd=%v busy=%t", rename != nil, m.actionBusy)
+	}
+	updated, refresh := m.Update(rename())
+	m = updated.(Model)
+	if refresh == nil || len(workspace.renames) != 1 || workspace.renames[0] != [2]string{"old.txt", "new.txt"} {
+		t.Fatalf("rename result: refresh=%v calls=%#v", refresh != nil, workspace.renames)
+	}
+}
+
+func TestWorkspaceFilesDragFileOntoDirectoryToMove(t *testing.T) {
+	workspace := &fakeWorkspace{}
+	m := newWithWorkspace(fakeProvider{}, 0, workspace)
+	m.active, m.width, m.height = workspaceFilesTab, 100, 20
+	m.workspaceLoading = false
+	m.workspaceEntries = []worktree.Entry{
+		{Path: "a.txt", Name: "a.txt"},
+		{Path: "folder", Name: "folder", IsDir: true},
+	}
+
+	updated, _ := m.Update(tea.MouseMsg{X: 2, Y: 7, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(Model)
+	if m.workspaceFileDragPath != "a.txt" {
+		t.Fatalf("drag source = %q", m.workspaceFileDragPath)
+	}
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 8, Button: tea.MouseButtonLeft, Action: tea.MouseActionMotion})
+	m = updated.(Model)
+	if !m.workspaceFileDragging || m.workspaceFileDragTarget != "folder" {
+		t.Fatalf("drag target = %q, dragging=%t", m.workspaceFileDragTarget, m.workspaceFileDragging)
+	}
+	updated, move := m.Update(tea.MouseMsg{X: 2, Y: 8, Button: tea.MouseButtonNone, Action: tea.MouseActionRelease})
+	m = updated.(Model)
+	if move == nil || !m.actionBusy {
+		t.Fatalf("drop did not start move: cmd=%v busy=%t", move != nil, m.actionBusy)
+	}
+	updated, _ = m.Update(move())
+	m = updated.(Model)
+	if len(workspace.renames) != 1 || workspace.renames[0] != [2]string{"a.txt", "folder/a.txt"} {
+		t.Fatalf("move calls = %#v", workspace.renames)
+	}
+}
+
+func TestWorkspaceFilesDragHighlightsSourceAndDropTarget(t *testing.T) {
+	m := newWithWorkspace(fakeProvider{}, 0, &fakeWorkspace{})
+	m.active, m.width, m.height = workspaceFilesTab, 100, 20
+	m.workspaceLoading = false
+	m.workspaceEntries = []worktree.Entry{
+		{Path: "a.txt", Name: "a.txt"},
+		{Path: "folder", Name: "folder", IsDir: true},
+	}
+
+	normal := m.workspaceList(40, 2)
+	m.workspaceFileDragPath = "a.txt"
+	m.workspaceFileDragTarget = "folder"
+	m.workspaceFileDragging = true
+	dragging := m.workspaceList(40, 2)
+	if dragging == normal || !strings.Contains(ansi.Strip(dragging), "← drop here") {
+		t.Fatalf("file drag did not highlight the drop target: %q", ansi.Strip(dragging))
+	}
+	if !strings.Contains(ansi.Strip(dragging), "a.txt") || !strings.Contains(ansi.Strip(dragging), "folder") {
+		t.Fatalf("drag rendering omitted source or target: %q", ansi.Strip(dragging))
 	}
 }
 
