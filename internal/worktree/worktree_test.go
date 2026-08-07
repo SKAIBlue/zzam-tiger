@@ -3,7 +3,6 @@ package worktree
 import (
 	"bytes"
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,18 +13,6 @@ import (
 
 	"github.com/SKAIBlue/zzam-tiger/internal/provider"
 )
-
-type failingIgnoreRunner struct{}
-
-func (failingIgnoreRunner) Run(context.Context, string, ...string) ([]byte, error) {
-	return nil, errors.New("git unavailable")
-}
-
-func (failingIgnoreRunner) RunInput(context.Context, []byte, string, ...string) ([]byte, error) {
-	return nil, errors.New("ignore check failed")
-}
-
-func (failingIgnoreRunner) LookPath(string) error { return nil }
 
 type historyRunner struct {
 	outputs [][]byte
@@ -63,6 +50,7 @@ func TestEntriesAndRead(t *testing.T) {
 	writeFile(t, repo, "docs/draft.txt", []byte("draft\n"))
 	writeFile(t, repo, "ignored/secret.txt", []byte("secret\n"))
 	writeFile(t, repo, ".gitignore", []byte("ignored/\n"))
+	writeFile(t, repo, ".env", []byte("TOKEN=secret\n"))
 
 	client := New(repo, provider.ExecRunner{})
 	entries, err := client.Entries(context.Background(), "")
@@ -73,12 +61,12 @@ func TestEntriesAndRead(t *testing.T) {
 	for i, entry := range entries {
 		paths[i] = entry.Path
 	}
-	for _, want := range []string{".gitignore", "README.md", "assets", "docs"} {
+	for _, want := range []string{".env", ".gitignore", "README.md", "assets", "docs", "ignored"} {
 		if !slices.Contains(paths, want) {
 			t.Errorf("Entries() missing %q: %v", want, paths)
 		}
 	}
-	for _, unwanted := range []string{".git", "assets/icon.png", "docs/draft.txt", "docs/guide.txt", "ignored"} {
+	for _, unwanted := range []string{".git", "assets/icon.png", "docs/draft.txt", "docs/guide.txt"} {
 		if slices.Contains(paths, unwanted) {
 			t.Errorf("Entries() unexpectedly contains %q: %v", unwanted, paths)
 		}
@@ -154,15 +142,6 @@ func TestRenameMovesFileWithoutReplacingDestination(t *testing.T) {
 	}
 	if err := client.Rename(context.Background(), "new.txt", "taken.txt"); err == nil {
 		t.Fatal("Rename replaced an existing destination")
-	}
-}
-
-func TestEntriesPropagatesIgnoreCheckFailure(t *testing.T) {
-	root := t.TempDir()
-	writeFile(t, root, "visible.txt", []byte("visible"))
-	client := New(root, failingIgnoreRunner{})
-	if _, err := client.Entries(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "ignore check failed") {
-		t.Fatalf("Entries ignore failure = %v", err)
 	}
 }
 

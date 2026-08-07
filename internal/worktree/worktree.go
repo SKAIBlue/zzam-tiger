@@ -20,13 +20,11 @@ import (
 
 // Client reads and mutates one local Git working tree.
 type Client struct {
-	root       string
-	runner     provider.Runner
-	filesystem bool
+	root   string
+	runner provider.Runner
 }
 
-// NewFilesystem creates a filesystem browser rooted at root.
-// Unlike New, it does not require Git and does not apply .gitignore rules.
+// NewFilesystem creates a filesystem browser rooted at root without requiring Git.
 func NewFilesystem(root string) *Client {
 	if abs, err := filepath.Abs(root); err == nil {
 		root = abs
@@ -34,7 +32,7 @@ func NewFilesystem(root string) *Client {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	return &Client{root: filepath.Clean(root), filesystem: true}
+	return &Client{root: filepath.Clean(root)}
 }
 
 // Open creates a client only when root belongs to a readable Git working tree.
@@ -181,67 +179,17 @@ func (c *Client) Entries(ctx context.Context, path string) ([]Entry, error) {
 	}
 
 	entries := make([]Entry, 0, len(dirEntries))
-	paths := make([]string, 0, len(dirEntries))
 	for _, dirEntry := range dirEntries {
 		if dirEntry.Name() == ".git" {
 			continue
 		}
 		entryPath := filepath.ToSlash(filepath.Join(clean, dirEntry.Name()))
 		entries = append(entries, Entry{Path: entryPath, Name: dirEntry.Name(), IsDir: dirEntry.IsDir()})
-		paths = append(paths, entryPath)
-	}
-
-	ignored := make(map[string]bool)
-	if !c.filesystem {
-		var err error
-		ignored, err = c.ignoredEntries(ctx, paths)
-		if err != nil {
-			return nil, err
-		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	visible := entries[:0]
-	for _, entry := range entries {
-		if !ignored[entry.Path] {
-			visible = append(visible, entry)
-		}
-	}
-	return visible, nil
-}
-
-func (c *Client) ignoredEntries(ctx context.Context, paths []string) (map[string]bool, error) {
-	ignored := make(map[string]bool)
-	if len(paths) == 0 {
-		return ignored, nil
-	}
-	if runner, ok := c.runner.(provider.InputRunner); ok {
-		input := []byte(strings.Join(paths, "\x00") + "\x00")
-		out, err := runner.RunInput(ctx, input, "git", "-C", c.root, "check-ignore", "-z", "--stdin")
-		if err != nil {
-			if provider.IsExitCode(err, 1) {
-				return ignored, nil
-			}
-			return nil, err
-		}
-		for _, path := range splitNUL(out) {
-			ignored[filepath.ToSlash(path)] = true
-		}
-		return ignored, nil
-	}
-	for _, path := range paths {
-		_, err := c.git(ctx, "check-ignore", "-q", "--", path)
-		if err == nil {
-			ignored[path] = true
-		} else if !provider.IsExitCode(err, 1) {
-			return nil, err
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-	}
-	return ignored, nil
+	return entries, nil
 }
 
 // Read reads a working-tree file without interpreting its contents.
